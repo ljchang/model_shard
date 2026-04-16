@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 from model_shard.membership.config import SwimConfig
 from model_shard.membership.records import (
+    AckMsg,
     IncomingMessage,
     MemberRecord,
     MemberState,
@@ -137,7 +138,23 @@ class MembershipState:
         return out
 
     def recv(self, msg: IncomingMessage, now: float) -> list[OutgoingMessage]:
+        if isinstance(msg, PingMsg):
+            return self._handle_ping(msg, now)
         return []
+
+    def _handle_ping(self, msg: PingMsg, now: float) -> list[OutgoingMessage]:
+        if msg.from_shard_id not in self._members:
+            return []
+        return [
+            OutgoingMessage(
+                target_shard_id=msg.from_shard_id,
+                payload=AckMsg(
+                    from_shard_id=self._self_id,
+                    from_incarnation=self._self_incarnation,
+                    deltas=[],
+                ),
+            )
+        ]
 
 
 __all__ = ["MembershipState", "PeerSpec"]

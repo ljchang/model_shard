@@ -91,3 +91,24 @@ def test_tick_emits_no_ping_when_no_alive_peers() -> None:
     s = make_state(peers=())
     out = s.tick(now=10.0)
     assert out == []
+
+
+def test_recv_ping_emits_ack_to_sender() -> None:
+    from model_shard.membership.records import AckMsg
+
+    s = make_state(self_id="n0", peers=("n1",))
+    msg = PingMsg(from_shard_id="n1", from_incarnation=0, deltas=[])
+    out = s.recv(msg, now=0.0)
+    assert len(out) == 1
+    assert out[0].target_shard_id == "n1"
+    payload = out[0].payload
+    assert isinstance(payload, AckMsg)
+    assert payload.from_shard_id == "n0"
+    assert payload.from_incarnation == 0
+
+
+def test_recv_ping_from_unknown_peer_is_dropped() -> None:
+    s = make_state(self_id="n0", peers=("n1",))
+    msg = PingMsg(from_shard_id="ghost", from_incarnation=0, deltas=[])
+    out = s.recv(msg, now=0.0)
+    assert out == []
