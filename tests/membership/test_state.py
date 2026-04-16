@@ -4,7 +4,14 @@ import random
 from typing import Any
 
 from model_shard.membership.config import SwimConfig
-from model_shard.membership.records import AckMsg, MemberState, PingMsg, PingReqAckMsg, PingReqMsg
+from model_shard.membership.records import (
+    AckMsg,
+    MemberRecord,
+    MemberState,
+    PingMsg,
+    PingReqAckMsg,
+    PingReqMsg,
+)
 from model_shard.membership.state import MembershipState, PeerSpec
 
 
@@ -337,3 +344,39 @@ def test_tick_does_not_promote_before_deadline() -> None:
         )
     s.tick(now=5.0)  # before 1.7 + 4.0 = 5.7
     assert s.view()[probe.target_id].state == MemberState.SUSPECT
+
+
+def _suspect_self_record(self_id: str, incarnation: int) -> MemberRecord:
+    return MemberRecord(
+        shard_id=self_id,
+        host="127.0.0.1",
+        udp_port=10000,
+        state=MemberState.SUSPECT,
+        incarnation=incarnation,
+        last_state_change=10.0,
+        suspect_deadline=14.0,
+    )
+
+
+def test_recv_ping_with_suspect_self_delta_bumps_own_incarnation() -> None:
+    s = make_state(self_id="n0", peers=("n1",))
+    delta = _suspect_self_record("n0", incarnation=0)
+    msg = PingMsg(from_shard_id="n1", from_incarnation=0, deltas=[delta])
+    s.recv(msg, now=10.0)
+    assert s._self_incarnation == 1
+    assert s.view()["n0"].state == MemberState.ALIVE
+    assert s.view()["n0"].incarnation == 1
+
+
+def test_refutation_emits_alive_self_in_ack_deltas() -> None:
+    s = make_state(self_id="n0", peers=("n1",))
+    delta = _suspect_self_record("n0", incarnation=0)
+    msg = PingMsg(from_shard_id="n1", from_incarnation=0, deltas=[delta])
+    out = s.recv(msg, now=10.0)
+    assert len(out) == 1
+    payload = out[0].payload
+    assert isinstance(payload, AckMsg)
+    refutation = next((d for d in payload.deltas if d.shard_id == "n0"), None)
+    assert refutation is not None
+    assert refutation.state == MemberState.ALIVE
+    assert refutation.incarnation == 1

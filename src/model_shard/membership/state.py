@@ -283,16 +283,87 @@ class MembershipState:
     def _handle_ping(self, msg: PingMsg, now: float) -> list[OutgoingMessage]:
         if msg.from_shard_id not in self._members:
             return []
+        self._apply_deltas(msg.deltas, now)
         return [
             OutgoingMessage(
                 target_shard_id=msg.from_shard_id,
                 payload=AckMsg(
                     from_shard_id=self._self_id,
                     from_incarnation=self._self_incarnation,
-                    deltas=[],
+                    deltas=self._select_outgoing_deltas(),
                 ),
             )
         ]
+
+    def _apply_deltas(self, deltas: list[MemberRecord], now: float) -> None:
+        for d in deltas:
+            if d.shard_id == self._self_id:
+                self._maybe_refute(d, now)
+                continue
+            if d.shard_id not in self._members:
+                # §5.1 in design: gossip about unknown shard_ids is dropped.
+                continue
+            self._maybe_apply_peer_delta(d, now)
+
+    def _maybe_refute(self, delta_about_self: MemberRecord, now: float) -> None:
+        # If gossip claims we are suspect/dead, refute by lifting our
+        # incarnation above whatever the gossip asserts.
+        if delta_about_self.state == MemberState.ALIVE:
+            return
+        if delta_about_self.incarnation < self._self_incarnation:
+            return  # stale gossip
+        self._self_incarnation = delta_about_self.incarnation + 1
+        prev = self._members[self._self_id]
+        new = MemberRecord(
+            shard_id=self._self_id,
+            host=prev.host,
+            udp_port=prev.udp_port,
+            state=MemberState.ALIVE,
+            incarnation=self._self_incarnation,
+            last_state_change=now,
+            suspect_deadline=None,
+        )
+        self._members[self._self_id] = new
+        self._transitions.append(
+            StateTransition(
+                shard_id=self._self_id,
+                old_state=prev.state,
+                new_record=new,
+            )
+        )
+
+    def _maybe_apply_peer_delta(self, d: MemberRecord, now: float) -> None:
+        # Stub for now: accept higher incarnations only. Task 14 refines this
+        # with the same-incarnation tiebreaker.
+        prev = self._members[d.shard_id]
+        if d.incarnation <= prev.incarnation:
+            return
+        new = MemberRecord(
+            shard_id=d.shard_id,
+            host=prev.host,
+            udp_port=prev.udp_port,
+            state=d.state,
+            incarnation=d.incarnation,
+            last_state_change=now,
+            suspect_deadline=(
+                now + self._cfg.t_suspect_ms / 1000.0
+                if d.state == MemberState.SUSPECT
+                else None
+            ),
+        )
+        self._members[d.shard_id] = new
+        self._transitions.append(
+            StateTransition(
+                shard_id=d.shard_id,
+                old_state=prev.state,
+                new_record=new,
+            )
+        )
+
+    def _select_outgoing_deltas(self) -> list[MemberRecord]:
+        # Filled in by Task 15 (gossip backlog). For now, always include the
+        # current self record so refutations propagate.
+        return [self._members[self._self_id]]
 
     def _handle_ack(self, msg: AckMsg, now: float) -> list[OutgoingMessage]:
         probe = self._pending_probe
