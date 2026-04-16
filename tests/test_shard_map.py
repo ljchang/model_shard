@@ -178,3 +178,14 @@ def test_node_address_equality() -> None:
     c = NodeAddress(host="h", port=2)
     assert a == b
     assert a != c
+
+
+def test_shard_spec_udp_port_is_tcp_port_plus_1000() -> None:
+    from model_shard.shard_map import NodeAddress, ShardSpec
+    spec = ShardSpec(
+        shard_id="x",
+        address=NodeAddress(host="127.0.0.1", port=9001),
+        start_layer=0,
+        end_layer=10,
+    )
+    assert spec.udp_port == 10001

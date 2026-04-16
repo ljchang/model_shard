@@ -33,6 +33,16 @@ class ShardSpec:
     start_layer: int
     end_layer: int
 
+    @property
+    def udp_port(self) -> int:
+        """SWIM UDP port; derived as tcp_port + 1000.
+
+        See `docs/superpowers/specs/2026-04-16-phase2-gossip-discovery-design.md`
+        §7.1. If a future deployment needs an explicit field, add `swim_port`
+        to the YAML schema and override this derivation.
+        """
+        return self.address.port + 1000
+
 
 class ShardMap:
     def __init__(self, entries: dict[str, ShardSpec]) -> None:
