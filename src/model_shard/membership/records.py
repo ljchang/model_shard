@@ -5,7 +5,7 @@ Every type here is frozen and free of I/O imports. The state machine
 protobuf lives in `messages.py`.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import IntEnum
 
 
@@ -28,8 +28,8 @@ class MemberRecord:
     udp_port: int
     state: MemberState
     incarnation: int
-    last_state_change: float
-    suspect_deadline: float | None  # set iff state == SUSPECT
+    last_state_change: float = field(compare=False)
+    suspect_deadline: float | None = field(compare=False)  # set iff state == SUSPECT
 
 
 @dataclass(frozen=True)
