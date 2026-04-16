@@ -416,8 +416,25 @@ class Node:
         )
 
     def _on_membership_change(self, transition: StateTransition) -> None:
-        # Wired in Task 25 to drop/redial TCP peer connections.
-        pass
+        # Only react to transitions involving our downstream peer (the only
+        # peer this node actively dials). The membership runner observes ALL
+        # transitions; we filter to just the relevant one.
+        if transition.shard_id != self._downstream.shard_id:
+            return
+        new_state = transition.new_record.state
+        if new_state.name in ("SUSPECT", "DEAD"):
+            _LOG.info(
+                "downstream peer %s -> %s; closing outbound TCP",
+                transition.shard_id,
+                new_state.name,
+            )
+            self._close_outbound()
+        elif new_state.name == "ALIVE" and transition.old_state is not None:
+            _LOG.info(
+                "downstream peer %s -> ALIVE; outbound TCP will redial on next send",
+                transition.shard_id,
+            )
+            # The lazy `_ensure_out_stream` already redials on next write.
 
     def _unavailable_peer(self) -> str | None:
         if self._membership is None:

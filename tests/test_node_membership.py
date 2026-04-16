@@ -119,3 +119,34 @@ def test_admission_passes_when_all_peers_alive(monkeypatch: pytest.MonkeyPatch) 
     with pytest.raises(RuntimeError, match="mlx not real"):
         n._handle_begin(req, buf)
     n.shutdown()
+
+
+def test_observer_closes_outbound_on_peer_going_suspect(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ENABLE_GOSSIP", "true")
+    from model_shard.membership.records import (
+        MemberRecord,
+        MemberState,
+        StateTransition,
+    )
+    from model_shard.node import Node
+
+    sm = _make_shardmap()
+    n = Node(
+        shard=sm.lookup("head"),
+        shard_map=sm,
+        loaded_model=MagicMock(),
+        total_layers=30,
+    )
+    # Inject a fake outbound stream so we can assert it gets closed.
+    closed = MagicMock()
+    n._out_stream = MagicMock(close=closed)
+    n._out_sock = MagicMock(close=MagicMock())
+
+    new_rec = MemberRecord("mid", "127.0.0.1", 20002, MemberState.SUSPECT, 0, 0.0, 4.0)
+    n._on_membership_change(
+        StateTransition(shard_id="mid", old_state=MemberState.ALIVE, new_record=new_rec)
+    )
+
+    assert closed.called
+    assert n._out_stream is None
+    n.shutdown()
