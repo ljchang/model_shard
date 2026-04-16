@@ -198,7 +198,58 @@ class MembershipState:
             return self._handle_ack(msg, now)
         if isinstance(msg, PingReqMsg):
             return self._handle_pingreq(msg, now)
+        if isinstance(msg, PingReqAckMsg):
+            return self._handle_pingreqack(msg, now)
         return []
+
+    def _handle_pingreqack(
+        self, msg: PingReqAckMsg, now: float
+    ) -> list[OutgoingMessage]:
+        probe = self._pending_probe
+        if probe is None or probe.probe_id != msg.probe_id:
+            return []
+
+        if msg.success:
+            self._pending_probe = None
+            return []
+
+        new_acks = probe.indirect_acks + 1
+        new_success = probe.indirect_success_seen or msg.success
+        if (
+            new_acks >= len(probe.indirect_targets)
+            and not new_success
+        ):
+            self._mark_suspect(probe.target_id, now)
+            self._pending_probe = None
+        else:
+            self._pending_probe = replace(
+                probe,
+                indirect_acks=new_acks,
+                indirect_success_seen=new_success,
+            )
+        return []
+
+    def _mark_suspect(self, shard_id: str, now: float) -> None:
+        prev = self._members[shard_id]
+        if prev.state in (MemberState.SUSPECT, MemberState.DEAD):
+            return
+        new = MemberRecord(
+            shard_id=shard_id,
+            host=prev.host,
+            udp_port=prev.udp_port,
+            state=MemberState.SUSPECT,
+            incarnation=prev.incarnation,
+            last_state_change=now,
+            suspect_deadline=now + self._cfg.t_suspect_ms / 1000.0,
+        )
+        self._members[shard_id] = new
+        self._transitions.append(
+            StateTransition(
+                shard_id=shard_id,
+                old_state=prev.state,
+                new_record=new,
+            )
+        )
 
     def _handle_ping(self, msg: PingMsg, now: float) -> list[OutgoingMessage]:
         if msg.from_shard_id not in self._members:

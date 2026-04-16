@@ -1,6 +1,7 @@
 """Pure state machine tests. Virtual clock; no sockets, no threads."""
 
 import random
+from typing import Any
 
 from model_shard.membership.config import SwimConfig
 from model_shard.membership.records import AckMsg, MemberState, PingMsg, PingReqAckMsg, PingReqMsg
@@ -232,3 +233,69 @@ def test_help_times_out_emits_pingreqack_failure() -> None:
     assert isinstance(payload, PingReqAckMsg)
     assert payload.success is False
     assert pra[0].target_shard_id == "requester"
+
+
+def _drive_to_indirect_phase(s: MembershipState) -> Any:
+    """Helper: advance s to the post-escalation phase and return the probe."""
+    s.tick(now=1.0)
+    s.tick(now=1.5)  # escalates to PingReq
+    probe = s._pending_probe
+    assert probe is not None
+    assert probe.indirect_sent_at is not None
+    return probe
+
+
+def test_positive_pingreqack_clears_probe() -> None:
+    s = make_state(peers=("n1", "n2", "n3", "n4"), seed=0)
+    probe = _drive_to_indirect_phase(s)
+    helper = probe.indirect_targets[0]
+    s.recv(
+        PingReqAckMsg(
+            from_shard_id=helper,
+            target_shard_id=probe.target_id,
+            probe_id=probe.probe_id,
+            success=True,
+            deltas=[],
+        ),
+        now=1.6,
+    )
+    assert s._pending_probe is None
+
+
+def test_all_negative_pingreqacks_mark_target_suspect() -> None:
+    s = make_state(peers=("n1", "n2", "n3", "n4"), seed=0)
+    probe = _drive_to_indirect_phase(s)
+    for helper in probe.indirect_targets:
+        s.recv(
+            PingReqAckMsg(
+                from_shard_id=helper,
+                target_shard_id=probe.target_id,
+                probe_id=probe.probe_id,
+                success=False,
+                deltas=[],
+            ),
+            now=1.7,
+        )
+    rec = s.view()[probe.target_id]
+    assert rec.state == MemberState.SUSPECT
+    assert rec.suspect_deadline is not None
+    # deadline = now + T_SUSPECT (4000ms)
+    assert abs(rec.suspect_deadline - (1.7 + 4.0)) < 1e-9
+
+
+def test_partial_negative_pingreqacks_does_not_mark_suspect() -> None:
+    s = make_state(peers=("n1", "n2", "n3", "n4"), seed=0)
+    probe = _drive_to_indirect_phase(s)
+    helper = probe.indirect_targets[0]
+    s.recv(
+        PingReqAckMsg(
+            from_shard_id=helper,
+            target_shard_id=probe.target_id,
+            probe_id=probe.probe_id,
+            success=False,
+            deltas=[],
+        ),
+        now=1.7,
+    )
+    rec = s.view()[probe.target_id]
+    assert rec.state == MemberState.ALIVE
