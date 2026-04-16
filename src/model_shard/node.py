@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import queue
 import socket
 import threading
@@ -39,6 +40,8 @@ import mlx.core as mx
 
 from model_shard._pb import wire_pb2
 from model_shard.envelope import recv_envelope, send_envelope
+from model_shard.membership import MembershipRunner, PeerSpec, SwimConfig
+from model_shard.membership.records import StateTransition
 from model_shard.mlx_engine import (
     LoadedModel,
     bytes_to_tensor,
@@ -92,6 +95,10 @@ class Node:
         self._stopping = threading.Event()
         self._server_sock: socket.socket | None = None
 
+        self._membership: MembershipRunner | None = None
+        if _gossip_enabled():
+            self._membership = self._build_membership_runner()
+
     # ------------------------------------------------------------------ roles
 
     @property
@@ -105,6 +112,9 @@ class Node:
     # ---------------------------------------------------------------- server
 
     def serve_forever(self) -> None:
+        if self._membership is not None:
+            self._membership.subscribe(self._on_membership_change)
+            self._membership.start()
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((self._shard.address.host, self._shard.address.port))
@@ -128,6 +138,8 @@ class Node:
 
     def shutdown(self) -> None:
         self._stopping.set()
+        if self._membership is not None:
+            self._membership.stop()
 
     def _handle_connection(self, conn: socket.socket) -> None:
         try:
@@ -366,6 +378,37 @@ class Node:
         with self._state_lock:
             self._debug_captures.clear()
 
+    # ------------------------------------------------------------ membership
+
+    @property
+    def membership(self) -> MembershipRunner | None:
+        return self._membership
+
+    def _build_membership_runner(self) -> MembershipRunner:
+        self_spec = PeerSpec(
+            shard_id=self._shard.shard_id,
+            host=self._shard.address.host,
+            udp_port=self._shard.udp_port,
+        )
+        peer_specs = [
+            PeerSpec(
+                shard_id=sid,
+                host=self._shard_map.lookup(sid).address.host,
+                udp_port=self._shard_map.lookup(sid).udp_port,
+            )
+            for sid in self._shard_map.all_shards()
+            if sid != self._shard.shard_id
+        ]
+        return MembershipRunner(
+            self_spec=self_spec,
+            peers=peer_specs,
+            config=SwimConfig(),
+        )
+
+    def _on_membership_change(self, transition: StateTransition) -> None:
+        # Wired in Task 25 to drop/redial TCP peer connections.
+        pass
+
 
 # -------------------------------------------------------------------- helpers
 
@@ -436,6 +479,10 @@ def _send_error(
     env.error.code = code
     env.error.detail = detail
     send_envelope(stream, env)
+
+
+def _gossip_enabled() -> bool:
+    return os.environ.get("ENABLE_GOSSIP", "true").lower() not in ("0", "false", "no")
 
 
 __all__ = ["Node"]
