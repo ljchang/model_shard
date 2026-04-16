@@ -24,9 +24,21 @@ RUN_NODE = REPO / "scripts" / "run_node.py"
 
 
 def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
+    # Each node needs tcp_port, tcp_port+1000 (UDP gossip), and
+    # tcp_port+2000 (HTTP debug) to all fit in 1..65535. The macOS
+    # ephemeral range (49152-65535) can hand back ports whose +2000
+    # derivation overflows, so we pick a random free port in 30000-60000.
+    import random
+
+    for _ in range(100):
+        port = random.randint(30000, 60000)
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("127.0.0.1", port))
+            return port
+        except OSError:
+            continue
+    raise RuntimeError("could not obtain a free port in 30000-60000 after 100 tries")
 
 
 def _write_shards_yaml(tmp_path: Path) -> tuple[Path, dict[str, int]]:
@@ -156,3 +168,31 @@ def test_killed_node_rejoins_returns_to_alive(tmp_path: Path) -> None:
                 return
             time.sleep(0.2)
         pytest.fail(f"mid did not rejoin to alive; final view={view}")
+
+
+@pytest.mark.slow
+def test_bootstrap_with_unreachable_seeds_starts_in_single_node_view(
+    tmp_path: Path,
+) -> None:
+    """Spawn ONE node whose shards.yaml lists two non-running peers.
+    The node must boot and report itself alive; the missing peers should be
+    detected as suspect/dead within T_SUSPECT."""
+    shards_yaml, ports = _write_shards_yaml(tmp_path)
+    debug_port = ports["head"] + 2000
+    head_proc = _spawn_node("head", shards_yaml)
+    try:
+        deadline = time.monotonic() + 8.0
+        view: dict[str, str] | None = None
+        while time.monotonic() < deadline:
+            view = _query_view("127.0.0.1", debug_port)
+            if (
+                view
+                and view.get("head") == "ALIVE"
+                and view.get("mid") in ("SUSPECT", "DEAD")
+            ):
+                return
+            time.sleep(0.2)
+        pytest.fail(f"single-node bootstrap fallback failed; final view={view}")
+    finally:
+        head_proc.terminate()
+        head_proc.wait(timeout=3)
