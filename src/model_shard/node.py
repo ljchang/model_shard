@@ -221,31 +221,44 @@ class Node:
     def _drive_decode_loop(
         self, request_id: str, state: _HeadRequestState
     ) -> None:
-        while state.generated < state.max_new_tokens:
-            token_id = state.token_queue.get()
-            state.generated += 1
-            is_final = state.generated >= state.max_new_tokens
+        try:
+            while state.generated < state.max_new_tokens:
+                token_id = state.token_queue.get()
+                state.generated += 1
+                is_final = state.generated >= state.max_new_tokens
 
-            _send_sampled_token_to(
-                state.client_stream,
-                request_id,
-                token_id,
-                position=state.generated - 1,
-                is_final=is_final,
-            )
+                _send_sampled_token_to(
+                    state.client_stream,
+                    request_id,
+                    token_id,
+                    position=state.generated - 1,
+                    is_final=is_final,
+                )
 
-            if is_final:
-                break
+                if is_final:
+                    break
 
-            # Next decode round: embed this token and forward an activation.
+                # Next decode round: embed this token and forward an activation.
+                with self._state_lock:
+                    cache = self._kv_caches[request_id]
+                h = embed_tokens(self._lm, mx.array([[token_id]]))
+                h = self._run_my_layers(h, cache)
+                self._forward_activation(request_id, h)
+
+            # Clean up everywhere.
+            self._broadcast_end(request_id)
+        except OSError as exc:
+            _LOG.warning("decode loop aborted by broken pipe: %s", exc)
+            with contextlib.suppress(OSError):
+                _send_error(
+                    state.client_stream,
+                    request_id,
+                    wire_pb2.ERR_SHARD_UNAVAILABLE,
+                    f"downstream peer unavailable: {exc}",
+                )
             with self._state_lock:
-                cache = self._kv_caches[request_id]
-            h = embed_tokens(self._lm, mx.array([[token_id]]))
-            h = self._run_my_layers(h, cache)
-            self._forward_activation(request_id, h)
-
-        # Clean up everywhere.
-        self._broadcast_end(request_id)
+                self._kv_caches.pop(request_id, None)
+                self._head_states.pop(request_id, None)
 
     def _handle_activation(
         self, act: wire_pb2.Activation, tensor_bytes: bytes

@@ -150,3 +150,46 @@ def test_observer_closes_outbound_on_peer_going_suspect(monkeypatch: pytest.Monk
     assert closed.called
     assert n._out_stream is None
     n.shutdown()
+
+
+def test_decode_loop_emits_error_to_client_on_broken_pipe(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ENABLE_GOSSIP", "true")
+    from model_shard.node import Node, _HeadRequestState
+
+    sm = _make_shardmap()
+    n = Node(
+        shard=sm.lookup("head"),
+        shard_map=sm,
+        loaded_model=MagicMock(),
+        total_layers=30,
+    )
+
+    # Set up a fake _drive_decode_loop scenario: a head state pointing at an
+    # in-memory client stream. Simulate a broken pipe on _forward_activation.
+    buf = io.BytesIO()
+    state = _HeadRequestState(client_stream=buf, max_new_tokens=4)
+    state.token_queue.put(123)  # one token to process
+
+    monkeypatch.setattr(
+        n,
+        "_forward_activation",
+        MagicMock(side_effect=BrokenPipeError("peer closed")),
+    )
+    monkeypatch.setattr(n, "_run_my_layers", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr(
+        "model_shard.node.embed_tokens", lambda *_a, **_k: MagicMock()
+    )
+
+    with n._state_lock:
+        n._kv_caches["req-1"] = []
+        n._head_states["req-1"] = state
+
+    n._drive_decode_loop("req-1", state)
+
+    buf.seek(0)
+    # Skip the SampledToken envelope (token 123); read the next envelope (the error).
+    _env1, _ = recv_envelope(buf)
+    env2, _ = recv_envelope(buf)
+    assert env2.WhichOneof("payload") == "error"
+    assert env2.error.code == wire_pb2.ERR_SHARD_UNAVAILABLE
+    n.shutdown()
