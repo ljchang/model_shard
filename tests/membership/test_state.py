@@ -380,3 +380,69 @@ def test_refutation_emits_alive_self_in_ack_deltas() -> None:
     assert refutation is not None
     assert refutation.state == MemberState.ALIVE
     assert refutation.incarnation == 1
+
+
+def test_refutation_floors_to_higher_incarnation_after_restart() -> None:
+    """Simulates: this node was at incarnation 5, was marked dead, restarted
+    at incarnation 0. Gossip arrives saying 'n0 dead at inc=5'. Node must
+    refute at inc=6, not inc=1."""
+    s = make_state(self_id="n0", peers=("n1",))
+    assert s._self_incarnation == 0
+    delta = MemberRecord(
+        shard_id="n0",
+        host="127.0.0.1",
+        udp_port=10000,
+        state=MemberState.DEAD,
+        incarnation=5,
+        last_state_change=10.0,
+        suspect_deadline=None,
+    )
+    s.recv(PingMsg(from_shard_id="n1", from_incarnation=0, deltas=[delta]), now=10.0)
+    assert s._self_incarnation == 6
+    assert s.view()["n0"].incarnation == 6
+    assert s.view()["n0"].state == MemberState.ALIVE
+
+
+def test_stale_gossip_about_self_at_lower_incarnation_is_ignored() -> None:
+    s = make_state(self_id="n0", peers=("n1",))
+    # First lift our incarnation to 5.
+    s.recv(
+        PingMsg(
+            from_shard_id="n1",
+            from_incarnation=0,
+            deltas=[
+                MemberRecord(
+                    shard_id="n0",
+                    host="127.0.0.1",
+                    udp_port=10000,
+                    state=MemberState.SUSPECT,
+                    incarnation=4,
+                    last_state_change=1.0,
+                    suspect_deadline=5.0,
+                )
+            ],
+        ),
+        now=1.0,
+    )
+    assert s._self_incarnation == 5
+    # Stale dead-at-inc=2 must not affect us.
+    s.recv(
+        PingMsg(
+            from_shard_id="n1",
+            from_incarnation=0,
+            deltas=[
+                MemberRecord(
+                    shard_id="n0",
+                    host="127.0.0.1",
+                    udp_port=10000,
+                    state=MemberState.DEAD,
+                    incarnation=2,
+                    last_state_change=2.0,
+                    suspect_deadline=None,
+                )
+            ],
+        ),
+        now=2.0,
+    )
+    assert s._self_incarnation == 5
+    assert s.view()["n0"].state == MemberState.ALIVE
