@@ -15,7 +15,9 @@ from model_shard.membership.config import SwimConfig
 from model_shard.membership.records import (
     AckMsg,
     IncomingMessage,
+    JoinMsg,
     MemberRecord,
+    MembershipDeltaMsg,
     MemberState,
     OutgoingMessage,
     PingMsg,
@@ -228,6 +230,67 @@ class MembershipState:
             return self._handle_pingreq(msg, now)
         if isinstance(msg, PingReqAckMsg):
             return self._handle_pingreqack(msg, now)
+        if isinstance(msg, JoinMsg):
+            return self._handle_join(msg, now)
+        if isinstance(msg, MembershipDeltaMsg):
+            return self._handle_delta(msg, now)
+        return []
+
+    def _handle_join(self, msg: JoinMsg, now: float) -> list[OutgoingMessage]:
+        rec = msg.self_record
+        prev = self._members.get(rec.shard_id)
+        installed = MemberRecord(
+            shard_id=rec.shard_id,
+            host=rec.host,
+            udp_port=rec.udp_port,
+            state=MemberState.ALIVE,
+            incarnation=rec.incarnation,
+            last_state_change=now,
+            suspect_deadline=None,
+        )
+        # If we previously recorded the newcomer as DEAD at higher incarnation,
+        # echo *that* record back so the newcomer applies the floor rule.
+        if prev is not None and prev.state == MemberState.DEAD and prev.incarnation > rec.incarnation:
+            members = list(self._members.values())
+        else:
+            self._members[rec.shard_id] = installed
+            self._transitions.append(
+                StateTransition(
+                    shard_id=rec.shard_id,
+                    old_state=(prev.state if prev else None),
+                    new_record=installed,
+                )
+            )
+            self._enqueue_backlog(installed, now)
+            members = list(self._members.values())
+        return [
+            OutgoingMessage(
+                target_shard_id=rec.shard_id,
+                payload=MembershipDeltaMsg(members=members),
+            )
+        ]
+
+    def _handle_delta(
+        self, msg: MembershipDeltaMsg, now: float
+    ) -> list[OutgoingMessage]:
+        # Bulk install of records (used by joining nodes after Join).
+        for rec in msg.members:
+            if rec.shard_id == self._self_id:
+                self._maybe_refute(rec, now)
+                continue
+            prev = self._members.get(rec.shard_id)
+            if prev is None:
+                self._members[rec.shard_id] = rec
+                self._transitions.append(
+                    StateTransition(
+                        shard_id=rec.shard_id,
+                        old_state=None,
+                        new_record=rec,
+                    )
+                )
+                self._enqueue_backlog(rec, now)
+                continue
+            self._maybe_apply_peer_delta(rec, now)
         return []
 
     def _handle_pingreqack(

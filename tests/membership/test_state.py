@@ -6,7 +6,9 @@ from typing import Any
 from model_shard.membership.config import SwimConfig
 from model_shard.membership.records import (
     AckMsg,
+    JoinMsg,
     MemberRecord,
+    MembershipDeltaMsg,
     MemberState,
     PingMsg,
     PingReqAckMsg,
@@ -546,3 +548,40 @@ def test_backlog_drains_oldest_first_across_calls() -> None:
     assert isinstance(p2, PingMsg)
     assert first_non_self(p1) == "a"
     assert first_non_self(p2) == "b"
+
+
+def test_recv_join_emits_membership_delta_with_full_view() -> None:
+    s = make_state(self_id="seed", peers=("n1",))
+    new_node = MemberRecord(
+        shard_id="newcomer",
+        host="127.0.0.1",
+        udp_port=10099,
+        state=MemberState.ALIVE,
+        incarnation=0,
+        last_state_change=0.0,
+        suspect_deadline=None,
+    )
+    out = s.recv(JoinMsg(self_record=new_node), now=3.0)
+    deltas = [m for m in out if isinstance(m.payload, MembershipDeltaMsg)]
+    assert len(deltas) == 1
+    payload = deltas[0].payload
+    assert isinstance(payload, MembershipDeltaMsg)
+    ids = {m.shard_id for m in payload.members}
+    assert {"seed", "n1", "newcomer"} <= ids
+    assert deltas[0].target_shard_id == "newcomer"
+
+
+def test_recv_join_installs_unknown_newcomer_in_view() -> None:
+    s = make_state(self_id="seed", peers=("n1",))
+    new_node = MemberRecord(
+        shard_id="newcomer",
+        host="127.0.0.1",
+        udp_port=10099,
+        state=MemberState.ALIVE,
+        incarnation=0,
+        last_state_change=0.0,
+        suspect_deadline=None,
+    )
+    s.recv(JoinMsg(self_record=new_node), now=3.0)
+    assert "newcomer" in s.view()
+    assert s.view()["newcomer"].state == MemberState.ALIVE
