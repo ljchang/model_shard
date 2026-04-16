@@ -491,3 +491,58 @@ def test_higher_incarnation_alive_does_resurrect_dead() -> None:
     s.recv(PingMsg(from_shard_id="src", from_incarnation=0, deltas=[alive]), now=2.0)
     assert s.view()["n1"].state == MemberState.ALIVE
     assert s.view()["n1"].incarnation == 3
+
+
+def test_outgoing_pings_carry_recent_transitions_in_deltas() -> None:
+    s = make_state(self_id="me", peers=("n1", "src", "n2"), seed=0)
+    # Mark n2 dead via incoming gossip → that adds a transition to the backlog.
+    dead = MemberRecord("n2", "127.0.0.1", 10003, MemberState.DEAD, 5, 1.0, None)
+    s.recv(PingMsg(from_shard_id="src", from_incarnation=0, deltas=[dead]), now=1.0)
+    # Drive a protocol period; expect outgoing Ping to carry the n2-dead delta.
+    out = s.tick(now=1.0)
+    pings = [m for m in out if isinstance(m.payload, PingMsg)]
+    assert len(pings) == 1
+    payload = pings[0].payload
+    assert isinstance(payload, PingMsg)
+    n2_delta = next((d for d in payload.deltas if d.shard_id == "n2"), None)
+    assert n2_delta is not None
+    assert n2_delta.state == MemberState.DEAD
+
+
+def test_backlog_caps_at_k_gossip_per_message() -> None:
+    cfg = SwimConfig(k_gossip=2)
+    s = make_state(
+        self_id="me", peers=("a", "b", "c", "d", "src"), seed=0, cfg=cfg
+    )
+    # Inject 4 transitions (more than K_GOSSIP).
+    for i, name in enumerate(("a", "b", "c", "d")):
+        d = MemberRecord(name, "127.0.0.1", 10001 + i, MemberState.DEAD, 1, 1.0, None)
+        s.recv(PingMsg(from_shard_id="src", from_incarnation=0, deltas=[d]), now=1.0)
+    out = s.tick(now=1.0)
+    pings = [m for m in out if isinstance(m.payload, PingMsg)]
+    payload = pings[0].payload
+    assert isinstance(payload, PingMsg)
+    # K_GOSSIP=2 entries from backlog, plus self always — 3 total at most.
+    assert len(payload.deltas) <= 3
+
+
+def test_backlog_drains_oldest_first_across_calls() -> None:
+    cfg = SwimConfig(k_gossip=1)
+    s = make_state(self_id="me", peers=("a", "b", "src"), seed=0, cfg=cfg)
+    da = MemberRecord("a", "127.0.0.1", 10001, MemberState.DEAD, 1, 1.0, None)
+    db = MemberRecord("b", "127.0.0.1", 10002, MemberState.DEAD, 1, 1.0, None)
+    s.recv(PingMsg(from_shard_id="src", from_incarnation=0, deltas=[da]), now=1.0)
+    s.recv(PingMsg(from_shard_id="src", from_incarnation=0, deltas=[db]), now=1.0)
+    # Two ticks should drain a, then b.
+    out1 = s.tick(now=1.0)
+    out2 = s.tick(now=2.0)
+
+    def first_non_self(p: PingMsg) -> str | None:
+        return next((d.shard_id for d in p.deltas if d.shard_id != "me"), None)
+
+    p1 = out1[0].payload
+    p2 = out2[0].payload
+    assert isinstance(p1, PingMsg)
+    assert isinstance(p2, PingMsg)
+    assert first_non_self(p1) == "a"
+    assert first_non_self(p2) == "b"

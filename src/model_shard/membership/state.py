@@ -53,6 +53,14 @@ class _PendingProbe:
     indirect_success_seen: bool  # any positive PingReqAck received?
 
 
+@dataclass
+class _BacklogEntry:
+    record: MemberRecord
+    priority: int  # number of times this entry has been gossiped
+    enqueued_at: float
+    seq: int  # insertion-order counter for stable tie-breaking
+
+
 class MembershipState:
     def __init__(
         self,
@@ -88,6 +96,8 @@ class MembershipState:
         self._pending_probe: _PendingProbe | None = None
         self._probe_counter: int = 0
         self._pending_helps: list[_PendingHelp] = []
+        self._backlog: list[_BacklogEntry] = []
+        self._backlog_seq: int = 0
 
     # ---------------------------------------------------------- read-only API
 
@@ -110,6 +120,7 @@ class MembershipState:
 
     def tick(self, now: float) -> list[OutgoingMessage]:
         out: list[OutgoingMessage] = []
+        self._gc_backlog(now)
 
         # 1. Resolve any pending help requests that have timed out.
         out.extend(self._maybe_timeout_helps(now))
@@ -125,6 +136,20 @@ class MembershipState:
             out.extend(self._start_protocol_period(now))
 
         return out
+
+    def _enqueue_backlog(self, rec: MemberRecord, now: float) -> None:
+        # Replace any existing entry for this shard_id with the latest record;
+        # priority resets to 0 so the new state propagates. The seq counter
+        # preserves insertion order as a stable sort tiebreaker.
+        self._backlog = [b for b in self._backlog if b.record.shard_id != rec.shard_id]
+        self._backlog.append(
+            _BacklogEntry(record=rec, priority=0, enqueued_at=now, seq=self._backlog_seq)
+        )
+        self._backlog_seq += 1
+
+    def _gc_backlog(self, now: float) -> None:
+        cutoff = 3 * self._cfg.t_suspect_ms / 1000.0
+        self._backlog = [b for b in self._backlog if (now - b.enqueued_at) <= cutoff]
 
     def _maybe_escalate_probe(self, now: float) -> list[OutgoingMessage]:
         probe = self._pending_probe
@@ -151,7 +176,7 @@ class MembershipState:
                         from_shard_id=self._self_id,
                         target_shard_id=probe.target_id,
                         probe_id=probe.probe_id,
-                        deltas=[],
+                        deltas=self._select_outgoing_deltas(),
                     ),
                 )
             )
@@ -189,7 +214,7 @@ class MembershipState:
                 payload=PingMsg(
                     from_shard_id=self._self_id,
                     from_incarnation=self._self_incarnation,
-                    deltas=[],
+                    deltas=self._select_outgoing_deltas(),
                 ),
             )
         ]
@@ -253,6 +278,7 @@ class MembershipState:
                 new_record=new,
             )
         )
+        self._enqueue_backlog(new, now)
 
     def _maybe_promote_dead(self, now: float) -> list[OutgoingMessage]:
         for shard_id, rec in list(self._members.items()):
@@ -278,6 +304,7 @@ class MembershipState:
                         new_record=new,
                     )
                 )
+                self._enqueue_backlog(new, now)
         return []
 
     def _handle_ping(self, msg: PingMsg, now: float) -> list[OutgoingMessage]:
@@ -331,6 +358,7 @@ class MembershipState:
                 new_record=new,
             )
         )
+        self._enqueue_backlog(new, now)
 
     def _maybe_apply_peer_delta(self, d: MemberRecord, now: float) -> None:
         prev = self._members[d.shard_id]
@@ -361,11 +389,18 @@ class MembershipState:
                 new_record=new,
             )
         )
+        self._enqueue_backlog(new, now)
 
     def _select_outgoing_deltas(self) -> list[MemberRecord]:
-        # Filled in by Task 15 (gossip backlog). For now, always include the
-        # current self record so refutations propagate.
-        return [self._members[self._self_id]]
+        # Always include our own current record so refutations and incarnation
+        # bumps propagate immediately. Then up to K_GOSSIP backlog entries
+        # ordered by ascending priority (oldest gossiped first).
+        deltas: list[MemberRecord] = [self._members[self._self_id]]
+        self._backlog.sort(key=lambda b: (b.priority, b.seq))
+        for entry in self._backlog[: self._cfg.k_gossip]:
+            deltas.append(entry.record)
+            entry.priority += 1
+        return deltas
 
     def _handle_ack(self, msg: AckMsg, now: float) -> list[OutgoingMessage]:
         probe = self._pending_probe
@@ -384,7 +419,7 @@ class MembershipState:
                             target_shard_id=h.target_id,
                             probe_id=h.probe_id,
                             success=True,
-                            deltas=[],
+                            deltas=self._select_outgoing_deltas(),
                         ),
                     )
                 )
@@ -412,7 +447,7 @@ class MembershipState:
                 payload=PingMsg(
                     from_shard_id=self._self_id,
                     from_incarnation=self._self_incarnation,
-                    deltas=[],
+                    deltas=self._select_outgoing_deltas(),
                 ),
             )
         ]
@@ -430,7 +465,7 @@ class MembershipState:
                             target_shard_id=h.target_id,
                             probe_id=h.probe_id,
                             success=False,
-                            deltas=[],
+                            deltas=self._select_outgoing_deltas(),
                         ),
                     )
                 )
