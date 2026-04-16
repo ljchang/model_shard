@@ -8,6 +8,7 @@ via `changes_since(watermark)` so the runner can fire observer callbacks.
 
 from __future__ import annotations
 
+import logging
 import random
 from dataclasses import dataclass, replace
 
@@ -25,6 +26,8 @@ from model_shard.membership.records import (
     PingReqMsg,
     StateTransition,
 )
+
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -391,7 +394,10 @@ class MembershipState:
                 self._maybe_refute(d, now)
                 continue
             if d.shard_id not in self._members:
-                # §5.1 in design: gossip about unknown shard_ids is dropped.
+                _LOG.warning(
+                    "dropping gossip about unknown shard_id %r (not in shards.yaml)",
+                    d.shard_id,
+                )
                 continue
             self._maybe_apply_peer_delta(d, now)
 

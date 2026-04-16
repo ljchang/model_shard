@@ -585,3 +585,18 @@ def test_recv_join_installs_unknown_newcomer_in_view() -> None:
     s.recv(JoinMsg(self_record=new_node), now=3.0)
     assert "newcomer" in s.view()
     assert s.view()["newcomer"].state == MemberState.ALIVE
+
+
+def test_gossip_about_unknown_shard_id_is_dropped(caplog: Any) -> None:
+    import logging
+    s = make_state(self_id="me", peers=("n1", "src"))
+    ghost = MemberRecord(
+        "ghost-shard", "10.0.0.99", 10099, MemberState.ALIVE, 0, 1.0, None
+    )
+    with caplog.at_level(logging.WARNING, logger="model_shard.membership.state"):
+        s.recv(
+            PingMsg(from_shard_id="src", from_incarnation=0, deltas=[ghost]),
+            now=1.0,
+        )
+    assert "ghost-shard" not in s.view()
+    assert any("ghost-shard" in r.message for r in caplog.records)
