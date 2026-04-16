@@ -19,6 +19,7 @@ from model_shard.membership.records import (
     MemberState,
     OutgoingMessage,
     PingMsg,
+    PingReqAckMsg,
     PingReqMsg,
     StateTransition,
 )
@@ -31,6 +32,14 @@ class PeerSpec:
     shard_id: str
     host: str
     udp_port: int
+
+
+@dataclass(frozen=True)
+class _PendingHelp:
+    probe_id: str
+    target_id: str
+    requester_id: str
+    sent_at: float
 
 
 @dataclass(frozen=True)
@@ -78,6 +87,7 @@ class MembershipState:
         self._next_period_at: float = float(self._cfg.t_ping_ms) / 1000.0
         self._pending_probe: _PendingProbe | None = None
         self._probe_counter: int = 0
+        self._pending_helps: list[_PendingHelp] = []
 
     # ---------------------------------------------------------- read-only API
 
@@ -101,10 +111,13 @@ class MembershipState:
     def tick(self, now: float) -> list[OutgoingMessage]:
         out: list[OutgoingMessage] = []
 
-        # 1. Escalate pending probe to indirect ping-req if ack overdue.
+        # 1. Resolve any pending help requests that have timed out.
+        out.extend(self._maybe_timeout_helps(now))
+
+        # 2. Escalate pending probe to indirect ping-req if ack overdue.
         out.extend(self._maybe_escalate_probe(now))
 
-        # 2. Start a new protocol period if it's time.
+        # 3. Start a new protocol period if it's time.
         if now >= self._next_period_at:
             out.extend(self._start_protocol_period(now))
 
@@ -183,6 +196,8 @@ class MembershipState:
             return self._handle_ping(msg, now)
         if isinstance(msg, AckMsg):
             return self._handle_ack(msg, now)
+        if isinstance(msg, PingReqMsg):
+            return self._handle_pingreq(msg, now)
         return []
 
     def _handle_ping(self, msg: PingMsg, now: float) -> list[OutgoingMessage]:
@@ -203,7 +218,73 @@ class MembershipState:
         probe = self._pending_probe
         if probe is not None and probe.target_id == msg.from_shard_id:
             self._pending_probe = None
-        return []
+
+        out: list[OutgoingMessage] = []
+        remaining: list[_PendingHelp] = []
+        for h in self._pending_helps:
+            if h.target_id == msg.from_shard_id:
+                out.append(
+                    OutgoingMessage(
+                        target_shard_id=h.requester_id,
+                        payload=PingReqAckMsg(
+                            from_shard_id=self._self_id,
+                            target_shard_id=h.target_id,
+                            probe_id=h.probe_id,
+                            success=True,
+                            deltas=[],
+                        ),
+                    )
+                )
+            else:
+                remaining.append(h)
+        self._pending_helps = remaining
+        return out
+
+    def _handle_pingreq(
+        self, msg: PingReqMsg, now: float
+    ) -> list[OutgoingMessage]:
+        if msg.target_shard_id not in self._members:
+            return []
+        self._pending_helps.append(
+            _PendingHelp(
+                probe_id=msg.probe_id,
+                target_id=msg.target_shard_id,
+                requester_id=msg.from_shard_id,
+                sent_at=now,
+            )
+        )
+        return [
+            OutgoingMessage(
+                target_shard_id=msg.target_shard_id,
+                payload=PingMsg(
+                    from_shard_id=self._self_id,
+                    from_incarnation=self._self_incarnation,
+                    deltas=[],
+                ),
+            )
+        ]
+
+    def _maybe_timeout_helps(self, now: float) -> list[OutgoingMessage]:
+        out: list[OutgoingMessage] = []
+        remaining: list[_PendingHelp] = []
+        for h in self._pending_helps:
+            if now >= h.sent_at + self._cfg.t_timeout_ms / 1000.0:
+                out.append(
+                    OutgoingMessage(
+                        target_shard_id=h.requester_id,
+                        payload=PingReqAckMsg(
+                            from_shard_id=self._self_id,
+                            target_shard_id=h.target_id,
+                            probe_id=h.probe_id,
+                            success=False,
+                            deltas=[],
+                        ),
+                    )
+                )
+            else:
+                remaining.append(h)
+        self._pending_helps = remaining
+        return out
 
 
 __all__ = ["MembershipState", "PeerSpec"]

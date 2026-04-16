@@ -3,7 +3,7 @@
 import random
 
 from model_shard.membership.config import SwimConfig
-from model_shard.membership.records import AckMsg, MemberState, PingMsg, PingReqMsg
+from model_shard.membership.records import AckMsg, MemberState, PingMsg, PingReqAckMsg, PingReqMsg
 from model_shard.membership.state import MembershipState, PeerSpec
 
 
@@ -172,3 +172,63 @@ def test_tick_does_not_escalate_if_ack_arrived_first() -> None:
     s.recv(AckMsg(from_shard_id=target, from_incarnation=0, deltas=[]), now=1.2)
     out = s.tick(now=1.5)
     assert all(not isinstance(m.payload, PingReqMsg) for m in out)
+
+
+def test_recv_pingreq_emits_ping_to_target_and_tracks_help() -> None:
+    s = make_state(self_id="helper", peers=("requester", "target"), seed=0)
+    msg = PingReqMsg(
+        from_shard_id="requester",
+        target_shard_id="target",
+        probe_id="r:1",
+        deltas=[],
+    )
+    out = s.recv(msg, now=2.0)
+    pings = [m for m in out if isinstance(m.payload, PingMsg)]
+    assert len(pings) == 1
+    assert pings[0].target_shard_id == "target"
+    # No PingReqAck yet — we await the target's Ack.
+    assert all(not isinstance(m.payload, PingReqAckMsg) for m in out)
+
+
+def test_recv_target_ack_during_help_emits_pingreqack_success() -> None:
+    s = make_state(self_id="helper", peers=("requester", "target"), seed=0)
+    s.recv(
+        PingReqMsg(
+            from_shard_id="requester",
+            target_shard_id="target",
+            probe_id="r:1",
+            deltas=[],
+        ),
+        now=2.0,
+    )
+    out = s.recv(
+        AckMsg(from_shard_id="target", from_incarnation=0, deltas=[]), now=2.1
+    )
+    pra = [m for m in out if isinstance(m.payload, PingReqAckMsg)]
+    assert len(pra) == 1
+    assert pra[0].target_shard_id == "requester"
+    payload = pra[0].payload
+    assert isinstance(payload, PingReqAckMsg)
+    assert payload.success is True
+    assert payload.probe_id == "r:1"
+
+
+def test_help_times_out_emits_pingreqack_failure() -> None:
+    s = make_state(self_id="helper", peers=("requester", "target"), seed=0)
+    s.recv(
+        PingReqMsg(
+            from_shard_id="requester",
+            target_shard_id="target",
+            probe_id="r:1",
+            deltas=[],
+        ),
+        now=2.0,
+    )
+    # T_TIMEOUT = 500ms — helper gives up at t=2.5
+    out = s.tick(now=2.5)
+    pra = [m for m in out if isinstance(m.payload, PingReqAckMsg)]
+    assert len(pra) == 1
+    payload = pra[0].payload
+    assert isinstance(payload, PingReqAckMsg)
+    assert payload.success is False
+    assert pra[0].target_shard_id == "requester"
