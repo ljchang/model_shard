@@ -1,0 +1,10 @@
+{
+  "description": "Canonical Phase 1 acceptance prompts. 5 prompts of varying style/length. Stable set — do not edit without regenerating reference artifacts.",
+  "prompts": [
+    "The capital of France is",
+    "In computer science, a Mixture-of-Experts model",
+    "Write a haiku about distributed systems.\n",
+    "def fibonacci(n):\n    if n <= 1:\n        return n\n    return",
+    "Q: What is 7 times 9?\nA:"
+  ]
+}

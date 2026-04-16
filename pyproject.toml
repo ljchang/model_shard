@@ -32,6 +32,10 @@ packages = ["src/model_shard"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "slow: loads the 14GB model; opt-in via `pytest -m slow`",
+]
+addopts = "-m 'not slow'"
 
 [tool.ruff]
 line-length = 100
