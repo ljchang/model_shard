@@ -114,10 +114,13 @@ class MembershipState:
         # 1. Resolve any pending help requests that have timed out.
         out.extend(self._maybe_timeout_helps(now))
 
-        # 2. Escalate pending probe to indirect ping-req if ack overdue.
+        # 2. Promote suspects to dead if deadline has passed.
+        out.extend(self._maybe_promote_dead(now))
+
+        # 3. Escalate pending probe to indirect ping-req if ack overdue.
         out.extend(self._maybe_escalate_probe(now))
 
-        # 3. Start a new protocol period if it's time.
+        # 4. Start a new protocol period if it's time.
         if now >= self._next_period_at:
             out.extend(self._start_protocol_period(now))
 
@@ -250,6 +253,32 @@ class MembershipState:
                 new_record=new,
             )
         )
+
+    def _maybe_promote_dead(self, now: float) -> list[OutgoingMessage]:
+        for shard_id, rec in list(self._members.items()):
+            if (
+                rec.state == MemberState.SUSPECT
+                and rec.suspect_deadline is not None
+                and now >= rec.suspect_deadline
+            ):
+                new = MemberRecord(
+                    shard_id=shard_id,
+                    host=rec.host,
+                    udp_port=rec.udp_port,
+                    state=MemberState.DEAD,
+                    incarnation=rec.incarnation,
+                    last_state_change=now,
+                    suspect_deadline=None,
+                )
+                self._members[shard_id] = new
+                self._transitions.append(
+                    StateTransition(
+                        shard_id=shard_id,
+                        old_state=MemberState.SUSPECT,
+                        new_record=new,
+                    )
+                )
+        return []
 
     def _handle_ping(self, msg: PingMsg, now: float) -> list[OutgoingMessage]:
         if msg.from_shard_id not in self._members:

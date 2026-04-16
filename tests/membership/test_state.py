@@ -299,3 +299,41 @@ def test_partial_negative_pingreqacks_does_not_mark_suspect() -> None:
     )
     rec = s.view()[probe.target_id]
     assert rec.state == MemberState.ALIVE
+
+
+def test_tick_promotes_suspect_to_dead_at_deadline() -> None:
+    s = make_state(peers=("n1", "n2", "n3", "n4"), seed=0)
+    probe = _drive_to_indirect_phase(s)
+    target = probe.target_id
+    for helper in probe.indirect_targets:
+        s.recv(
+            PingReqAckMsg(
+                from_shard_id=helper,
+                target_shard_id=target,
+                probe_id=probe.probe_id,
+                success=False,
+                deltas=[],
+            ),
+            now=1.7,
+        )
+    # Suspect deadline = 1.7 + 4.0 = 5.7
+    s.tick(now=5.7)
+    assert s.view()[target].state == MemberState.DEAD
+
+
+def test_tick_does_not_promote_before_deadline() -> None:
+    s = make_state(peers=("n1", "n2", "n3", "n4"), seed=0)
+    probe = _drive_to_indirect_phase(s)
+    for helper in probe.indirect_targets:
+        s.recv(
+            PingReqAckMsg(
+                from_shard_id=helper,
+                target_shard_id=probe.target_id,
+                probe_id=probe.probe_id,
+                success=False,
+                deltas=[],
+            ),
+            now=1.7,
+        )
+    s.tick(now=5.0)  # before 1.7 + 4.0 = 5.7
+    assert s.view()[probe.target_id].state == MemberState.SUSPECT
