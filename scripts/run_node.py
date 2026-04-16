@@ -3,27 +3,73 @@
 Usage:
     uv run python scripts/run_node.py \\
         --config config/shards.yaml \\
-        --shard-id layer_0-10 \\
+        --shard head \\
         [--model mlx-community/gemma-4-26b-a4b-it-4bit]
+
+Set SHARD_DRY_RUN=true to skip model loading (uses MagicMock); useful for
+membership/gossip tests that do not exercise inference.
+
+A tiny HTTP debug endpoint is served at tcp_port + 2000 and responds to
+GET /membership with a JSON snapshot of the gossip membership view.
 """
 
 from __future__ import annotations
 
 import argparse
+import http.server
+import json
 import logging
+import os
 import signal
+import socketserver
+import threading
 from pathlib import Path
 from types import FrameType
 
-from model_shard.mlx_engine import load_model
+from model_shard.mlx_engine import LoadedModel
 from model_shard.node import Node
 from model_shard.shard_map import ShardMap
+
+
+def _start_membership_debug_endpoint(node: Node, debug_port: int) -> None:
+    handler_node = node
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            if self.path != "/membership":
+                self.send_response(404)
+                self.end_headers()
+                return
+            if handler_node.membership is None:
+                payload: dict[str, object] = {}
+            else:
+                view = handler_node.membership.state.view()
+                payload = {
+                    sid: {"state": rec.state.name, "incarnation": rec.incarnation}
+                    for sid, rec in view.items()
+                }
+            body = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args: object) -> None:
+            pass  # silence
+
+    srv = socketserver.TCPServer(("127.0.0.1", debug_port), Handler)
+    srv.allow_reuse_address = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--shard-id", required=True)
+    # Accept both --shard and --shard-id for backwards compatibility.
+    shard_group = parser.add_mutually_exclusive_group(required=True)
+    shard_group.add_argument("--shard", dest="shard_id")
+    shard_group.add_argument("--shard-id", dest="shard_id")
     parser.add_argument("--model", default="mlx-community/gemma-4-26b-a4b-it-4bit")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
@@ -41,30 +87,50 @@ def main() -> None:
         shard_map.lookup(sid).end_layer for sid in shard_map.all_shards()
     )
 
-    log.info("loading model %s", args.model)
-    lm = load_model(args.model)
-    log.info(
-        "loaded: %d layers; serving shard %s layers [%d, %d) on %s:%d",
-        lm.num_layers,
-        shard.shard_id,
-        shard.start_layer,
-        shard.end_layer,
-        shard.address.host,
-        shard.address.port,
-    )
-    if lm.num_layers != total_layers:
-        log.warning(
-            "model has %d layers but config expects %d — using model value",
-            lm.num_layers,
-            total_layers,
+    lm: LoadedModel
+    if os.environ.get("SHARD_DRY_RUN") == "true":
+        from unittest.mock import MagicMock
+
+        mock = MagicMock()
+        mock.num_layers = total_layers
+        lm = mock
+        log.info(
+            "SHARD_DRY_RUN: skipping model load; serving shard %s layers [%d, %d) on %s:%d",
+            shard.shard_id,
+            shard.start_layer,
+            shard.end_layer,
+            shard.address.host,
+            shard.address.port,
         )
+    else:
+        from model_shard.mlx_engine import load_model
+
+        log.info("loading model %s", args.model)
+        lm = load_model(args.model)
+        log.info(
+            "loaded: %d layers; serving shard %s layers [%d, %d) on %s:%d",
+            lm.num_layers,
+            shard.shard_id,
+            shard.start_layer,
+            shard.end_layer,
+            shard.address.host,
+            shard.address.port,
+        )
+        if lm.num_layers != total_layers:
+            log.warning(
+                "model has %d layers but config expects %d — using model value",
+                lm.num_layers,
+                total_layers,
+            )
 
     node = Node(
         shard=shard,
         shard_map=shard_map,
         loaded_model=lm,
-        total_layers=lm.num_layers,
+        total_layers=total_layers,
     )
+
+    _start_membership_debug_endpoint(node, debug_port=shard.address.port + 2000)
 
     def _handle_signal(signum: int, _frame: FrameType | None) -> None:
         log.info("received signal %d, shutting down", signum)
