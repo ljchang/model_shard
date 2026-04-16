@@ -17,6 +17,7 @@ from model_shard.membership.records import (
     MemberRecord,
     MemberState,
     OutgoingMessage,
+    PingMsg,
     StateTransition,
 )
 
@@ -28,6 +29,17 @@ class PeerSpec:
     shard_id: str
     host: str
     udp_port: int
+
+
+@dataclass(frozen=True)
+class _PendingProbe:
+    probe_id: str
+    target_id: str
+    sent_at: float
+    indirect_sent_at: float | None  # set when escalated to ping-req
+    indirect_targets: tuple[str, ...]  # peers contacted via ping-req
+    indirect_acks: int  # count of PingReqAck (success or failure) received
+    indirect_success_seen: bool  # any positive PingReqAck received?
 
 
 class MembershipState:
@@ -58,6 +70,13 @@ class MembershipState:
             )
         self._transitions: list[StateTransition] = []
 
+        # Protocol-period state. Each period: pick a peer, ping, await ack,
+        # escalate to indirect probe if no ack, finally suspect on no positive
+        # PingReqAck.
+        self._next_period_at: float = float(self._cfg.t_ping_ms) / 1000.0
+        self._pending_probe: _PendingProbe | None = None
+        self._probe_counter: int = 0
+
     # ---------------------------------------------------------- read-only API
 
     def view(self) -> dict[str, MemberRecord]:
@@ -78,7 +97,44 @@ class MembershipState:
     # so type-checkers and importers see the expected surface from Task 4 on.
 
     def tick(self, now: float) -> list[OutgoingMessage]:
-        return []
+        out: list[OutgoingMessage] = []
+        if now < self._next_period_at:
+            return out
+
+        # Start of new protocol period. Pick a random ALIVE peer (excluding self).
+        candidates = [
+            r.shard_id
+            for r in self._members.values()
+            if r.shard_id != self._self_id and r.state == MemberState.ALIVE
+        ]
+        if not candidates:
+            self._next_period_at = now + self._cfg.t_ping_ms / 1000.0
+            return out
+
+        target = self._rng.choice(candidates)
+        self._probe_counter += 1
+        probe_id = f"{self._self_id}:{self._probe_counter}"
+        self._pending_probe = _PendingProbe(
+            probe_id=probe_id,
+            target_id=target,
+            sent_at=now,
+            indirect_sent_at=None,
+            indirect_targets=(),
+            indirect_acks=0,
+            indirect_success_seen=False,
+        )
+        out.append(
+            OutgoingMessage(
+                target_shard_id=target,
+                payload=PingMsg(
+                    from_shard_id=self._self_id,
+                    from_incarnation=self._self_incarnation,
+                    deltas=[],
+                ),
+            )
+        )
+        self._next_period_at = now + self._cfg.t_ping_ms / 1000.0
+        return out
 
     def recv(self, msg: IncomingMessage, now: float) -> list[OutgoingMessage]:
         return []

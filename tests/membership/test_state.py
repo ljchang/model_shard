@@ -3,7 +3,7 @@
 import random
 
 from model_shard.membership.config import SwimConfig
-from model_shard.membership.records import MemberState
+from model_shard.membership.records import MemberState, PingMsg
 from model_shard.membership.state import MembershipState, PeerSpec
 
 
@@ -51,3 +51,43 @@ def test_view_returns_a_copy_not_internal_reference() -> None:
     view.clear()
     # Mutating the returned dict must not affect internal state.
     assert "n0" in s.view()
+
+
+def test_tick_emits_no_message_before_first_protocol_period() -> None:
+    s = make_state()
+    # The first protocol period fires at t = T_PING; before that, no ping.
+    out = s.tick(now=0.5)
+    assert out == []
+
+
+def test_tick_emits_ping_at_first_protocol_period() -> None:
+    s = make_state(peers=("n1", "n2"), seed=0)
+    out = s.tick(now=1.0)  # exactly T_PING = 1000ms
+    assert len(out) == 1
+    msg = out[0]
+    assert isinstance(msg.payload, PingMsg)
+    assert msg.payload.from_shard_id == "n0"
+    assert msg.payload.from_incarnation == 0
+    # Target must be one of the peers, never self.
+    assert msg.target_shard_id in {"n1", "n2"}
+    assert msg.target_shard_id != "n0"
+
+
+def test_tick_does_not_re_emit_within_one_period() -> None:
+    s = make_state(seed=0)
+    s.tick(now=1.0)
+    out = s.tick(now=1.5)
+    assert out == []
+
+
+def test_tick_emits_again_after_full_period() -> None:
+    s = make_state(seed=0)
+    s.tick(now=1.0)
+    out = s.tick(now=2.0)
+    assert len(out) == 1
+
+
+def test_tick_emits_no_ping_when_no_alive_peers() -> None:
+    s = make_state(peers=())
+    out = s.tick(now=10.0)
+    assert out == []
