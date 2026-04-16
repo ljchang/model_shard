@@ -9,7 +9,7 @@ via `changes_since(watermark)` so the runner can fire observer callbacks.
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from model_shard.membership.config import SwimConfig
 from model_shard.membership.records import (
@@ -19,6 +19,7 @@ from model_shard.membership.records import (
     MemberState,
     OutgoingMessage,
     PingMsg,
+    PingReqMsg,
     StateTransition,
 )
 
@@ -99,10 +100,51 @@ class MembershipState:
 
     def tick(self, now: float) -> list[OutgoingMessage]:
         out: list[OutgoingMessage] = []
-        if now < self._next_period_at:
-            return out
 
-        # Start of new protocol period. Pick a random ALIVE peer (excluding self).
+        # 1. Escalate pending probe to indirect ping-req if ack overdue.
+        out.extend(self._maybe_escalate_probe(now))
+
+        # 2. Start a new protocol period if it's time.
+        if now >= self._next_period_at:
+            out.extend(self._start_protocol_period(now))
+
+        return out
+
+    def _maybe_escalate_probe(self, now: float) -> list[OutgoingMessage]:
+        probe = self._pending_probe
+        if probe is None or probe.indirect_sent_at is not None:
+            return []
+        if now < probe.sent_at + self._cfg.t_timeout_ms / 1000.0:
+            return []
+
+        # Pick K_INDIRECT random alive peers, excluding self and the target.
+        candidates = [
+            r.shard_id
+            for r in self._members.values()
+            if r.shard_id not in (self._self_id, probe.target_id)
+            and r.state == MemberState.ALIVE
+        ]
+        self._rng.shuffle(candidates)
+        chosen = tuple(candidates[: self._cfg.k_indirect])
+        out: list[OutgoingMessage] = []
+        for helper in chosen:
+            out.append(
+                OutgoingMessage(
+                    target_shard_id=helper,
+                    payload=PingReqMsg(
+                        from_shard_id=self._self_id,
+                        target_shard_id=probe.target_id,
+                        probe_id=probe.probe_id,
+                        deltas=[],
+                    ),
+                )
+            )
+        self._pending_probe = replace(
+            probe, indirect_sent_at=now, indirect_targets=chosen
+        )
+        return out
+
+    def _start_protocol_period(self, now: float) -> list[OutgoingMessage]:
         candidates = [
             r.shard_id
             for r in self._members.values()
@@ -110,7 +152,7 @@ class MembershipState:
         ]
         if not candidates:
             self._next_period_at = now + self._cfg.t_ping_ms / 1000.0
-            return out
+            return []
 
         target = self._rng.choice(candidates)
         self._probe_counter += 1
@@ -124,7 +166,8 @@ class MembershipState:
             indirect_acks=0,
             indirect_success_seen=False,
         )
-        out.append(
+        self._next_period_at = now + self._cfg.t_ping_ms / 1000.0
+        return [
             OutgoingMessage(
                 target_shard_id=target,
                 payload=PingMsg(
@@ -133,9 +176,7 @@ class MembershipState:
                     deltas=[],
                 ),
             )
-        )
-        self._next_period_at = now + self._cfg.t_ping_ms / 1000.0
-        return out
+        ]
 
     def recv(self, msg: IncomingMessage, now: float) -> list[OutgoingMessage]:
         if isinstance(msg, PingMsg):
