@@ -333,10 +333,12 @@ class MembershipState:
         )
 
     def _maybe_apply_peer_delta(self, d: MemberRecord, now: float) -> None:
-        # Stub for now: accept higher incarnations only. Task 14 refines this
-        # with the same-incarnation tiebreaker.
         prev = self._members[d.shard_id]
-        if d.incarnation <= prev.incarnation:
+        if d.incarnation < prev.incarnation:
+            return
+        if d.incarnation == prev.incarnation and d.state <= prev.state:
+            # Same incarnation: only apply if the new state is *more severe*
+            # (DEAD > SUSPECT > ALIVE; the IntEnum ordering encodes this).
             return
         new = MemberRecord(
             shard_id=d.shard_id,

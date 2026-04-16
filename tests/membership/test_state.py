@@ -446,3 +446,48 @@ def test_stale_gossip_about_self_at_lower_incarnation_is_ignored() -> None:
     )
     assert s._self_incarnation == 5
     assert s.view()["n0"].state == MemberState.ALIVE
+
+
+def test_same_incarnation_dead_overrides_alive() -> None:
+    # n1 currently alive at inc=0. Gossip says n1 dead at inc=0.
+    dead_n1 = MemberRecord("n1", "127.0.0.1", 10001, MemberState.DEAD, 0, 5.0, None)
+    s2 = make_state(self_id="me", peers=("n1", "src"))
+    s2.recv(
+        PingMsg(from_shard_id="src", from_incarnation=0, deltas=[dead_n1]),
+        now=5.0,
+    )
+    assert s2.view()["n1"].state == MemberState.DEAD
+
+
+def test_same_incarnation_suspect_overrides_alive() -> None:
+    s = make_state(self_id="me", peers=("n1", "src"))
+    suspect = MemberRecord(
+        "n1", "127.0.0.1", 10001, MemberState.SUSPECT, 0, 5.0, 9.0
+    )
+    s.recv(
+        PingMsg(from_shard_id="src", from_incarnation=0, deltas=[suspect]),
+        now=5.0,
+    )
+    assert s.view()["n1"].state == MemberState.SUSPECT
+
+
+def test_same_incarnation_alive_does_not_override_dead() -> None:
+    s = make_state(self_id="me", peers=("n1", "src"))
+    # First mark n1 dead via gossip at inc=2.
+    dead = MemberRecord("n1", "127.0.0.1", 10001, MemberState.DEAD, 2, 1.0, None)
+    s.recv(PingMsg(from_shard_id="src", from_incarnation=0, deltas=[dead]), now=1.0)
+    assert s.view()["n1"].state == MemberState.DEAD
+    # Now alive gossip at the same inc must not resurrect.
+    alive = MemberRecord("n1", "127.0.0.1", 10001, MemberState.ALIVE, 2, 2.0, None)
+    s.recv(PingMsg(from_shard_id="src", from_incarnation=0, deltas=[alive]), now=2.0)
+    assert s.view()["n1"].state == MemberState.DEAD
+
+
+def test_higher_incarnation_alive_does_resurrect_dead() -> None:
+    s = make_state(self_id="me", peers=("n1", "src"))
+    dead = MemberRecord("n1", "127.0.0.1", 10001, MemberState.DEAD, 2, 1.0, None)
+    s.recv(PingMsg(from_shard_id="src", from_incarnation=0, deltas=[dead]), now=1.0)
+    alive = MemberRecord("n1", "127.0.0.1", 10001, MemberState.ALIVE, 3, 2.0, None)
+    s.recv(PingMsg(from_shard_id="src", from_incarnation=0, deltas=[alive]), now=2.0)
+    assert s.view()["n1"].state == MemberState.ALIVE
+    assert s.view()["n1"].incarnation == 3
