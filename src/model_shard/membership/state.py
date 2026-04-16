@@ -198,6 +198,18 @@ class MembershipState:
         return out
 
     def _start_protocol_period(self, now: float) -> list[OutgoingMessage]:
+        # If the previous probe was in the indirect phase and never got a
+        # successful PingReqAck, the period expired without confirmation —
+        # declare the target suspect before starting a fresh period.
+        prev = self._pending_probe
+        if (
+            prev is not None
+            and prev.indirect_sent_at is not None
+            and not prev.indirect_success_seen
+        ):
+            self._mark_suspect(prev.target_id, now)
+        self._pending_probe = None
+
         candidates = [
             r.shard_id
             for r in self._members.values()
@@ -482,6 +494,13 @@ class MembershipState:
         probe = self._pending_probe
         if probe is not None and probe.target_id == msg.from_shard_id:
             self._pending_probe = None
+
+        # Apply piggybacked gossip deltas, just as we do on Ping.  This is
+        # critical for dead-node rejoin: when a restarted node sends a Ping and
+        # receives an Ack that carries its own DEAD record, `_apply_deltas`
+        # calls `_maybe_refute`, which bumps the node's incarnation above the
+        # DEAD epoch and propagates ALIVE at the new incarnation.
+        self._apply_deltas(msg.deltas, now)
 
         out: list[OutgoingMessage] = []
         remaining: list[_PendingHelp] = []

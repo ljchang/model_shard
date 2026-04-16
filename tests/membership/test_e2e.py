@@ -96,3 +96,63 @@ def test_three_nodes_converge_on_alive(tmp_path: Path) -> None:
                 return
             time.sleep(0.2)
         pytest.fail(f"cluster did not converge within 5s; final view={view}")
+
+
+@pytest.mark.slow
+def test_kill_one_node_others_detect_dead(tmp_path: Path) -> None:
+    with _cluster(tmp_path) as (_, ports, procs):
+        debug_port = ports["head"] + 2000
+        # Wait for convergence first.
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            view = _query_view("127.0.0.1", debug_port)
+            if view and all(v == "ALIVE" for v in view.values()) and len(view) == 3:
+                break
+            time.sleep(0.2)
+        else:
+            pytest.fail("did not converge before kill")
+
+        procs["mid"].terminate()
+        procs["mid"].wait(timeout=3)
+
+        # Within ~7s the head should mark mid dead.
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline:
+            view = _query_view("127.0.0.1", debug_port)
+            if view and view.get("mid") == "DEAD":
+                return
+            time.sleep(0.2)
+        pytest.fail(f"head did not detect mid dead; final view={view}")
+
+
+@pytest.mark.slow
+def test_killed_node_rejoins_returns_to_alive(tmp_path: Path) -> None:
+    with _cluster(tmp_path) as (shards_yaml, ports, procs):
+        debug_port = ports["head"] + 2000
+        # Converge.
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            view = _query_view("127.0.0.1", debug_port)
+            if view and all(v == "ALIVE" for v in view.values()):
+                break
+            time.sleep(0.2)
+        # Kill mid.
+        procs["mid"].terminate()
+        procs["mid"].wait(timeout=3)
+        # Wait for dead.
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline:
+            view = _query_view("127.0.0.1", debug_port)
+            if view and view.get("mid") == "DEAD":
+                break
+            time.sleep(0.2)
+        # Restart mid.
+        procs["mid"] = _spawn_node("mid", shards_yaml)
+        # Within ~5s mid should be alive again.
+        deadline = time.monotonic() + 6.0
+        while time.monotonic() < deadline:
+            view = _query_view("127.0.0.1", debug_port)
+            if view and view.get("mid") == "ALIVE":
+                return
+            time.sleep(0.2)
+        pytest.fail(f"mid did not rejoin to alive; final view={view}")
