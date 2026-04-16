@@ -171,6 +171,39 @@ def test_killed_node_rejoins_returns_to_alive(tmp_path: Path) -> None:
 
 
 @pytest.mark.slow
+def test_phase1_tier1_passes_with_membership_running(
+    three_node_pipeline: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Smoke regression: Tier 1 exact-match still passes with membership layer
+    running. ENABLE_GOSSIP defaults to true, so the session-scoped cluster
+    already has gossip on; this test makes the dependency explicit."""
+    import json as _json
+
+    from model_shard.client import Client
+
+    monkeypatch.setenv("ENABLE_GOSSIP", "true")
+    manifest_path = REPO / "artifacts" / "ref" / "manifest.json"
+    if not manifest_path.exists():
+        pytest.skip(
+            "reference artifacts missing — run: "
+            "uv run python scripts/run_reference.py "
+            "--prompt-set tests/prompts.json --out-dir artifacts/ref"
+        )
+    manifest = _json.loads(manifest_path.read_text())
+    record = manifest["prompts"][0]
+    prompt_tokens = list(record["prompt_tokens"])
+    expected_prefix = list(record["generated_tokens"])[:32]
+
+    head = three_node_pipeline.shard_map.lookup("layer_0-10")  # type: ignore[attr-defined]
+    got = Client(head_address=head.address).generate(prompt_tokens, max_new_tokens=32)
+    assert got == expected_prefix, (
+        f"Phase 1 Tier 1 regression under ENABLE_GOSSIP=true: "
+        f"got {got[:10]}... != expected {expected_prefix[:10]}..."
+    )
+
+
+@pytest.mark.slow
 def test_bootstrap_with_unreachable_seeds_starts_in_single_node_view(
     tmp_path: Path,
 ) -> None:
