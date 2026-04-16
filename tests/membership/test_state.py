@@ -112,3 +112,32 @@ def test_recv_ping_from_unknown_peer_is_dropped() -> None:
     msg = PingMsg(from_shard_id="ghost", from_incarnation=0, deltas=[])
     out = s.recv(msg, now=0.0)
     assert out == []
+
+
+def test_recv_ack_clears_pending_probe() -> None:
+    from model_shard.membership.records import AckMsg
+
+    s = make_state(seed=0)
+    s.tick(now=1.0)  # produces a Ping
+    pending_target = s._pending_probe.target_id  # type: ignore[union-attr]
+    ack = AckMsg(from_shard_id=pending_target, from_incarnation=0, deltas=[])
+    s.recv(ack, now=1.2)
+    assert s._pending_probe is None
+
+
+def test_recv_ack_from_unrelated_peer_is_ignored() -> None:
+    from model_shard.membership.records import AckMsg
+
+    s = make_state(seed=0)
+    s.tick(now=1.0)
+    pending = s._pending_probe
+    assert pending is not None
+    # Determine the "other" peer (not the target of the pending probe)
+    if pending.target_id == "n1":
+        other = "n2"
+    else:
+        other = "n1"
+    ack = AckMsg(from_shard_id=other, from_incarnation=0, deltas=[])
+    s.recv(ack, now=1.2)
+    # pending probe still in place
+    assert s._pending_probe is pending

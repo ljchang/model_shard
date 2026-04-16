@@ -140,6 +140,8 @@ class MembershipState:
     def recv(self, msg: IncomingMessage, now: float) -> list[OutgoingMessage]:
         if isinstance(msg, PingMsg):
             return self._handle_ping(msg, now)
+        if isinstance(msg, AckMsg):
+            return self._handle_ack(msg, now)
         return []
 
     def _handle_ping(self, msg: PingMsg, now: float) -> list[OutgoingMessage]:
@@ -155,6 +157,12 @@ class MembershipState:
                 ),
             )
         ]
+
+    def _handle_ack(self, msg: AckMsg, now: float) -> list[OutgoingMessage]:
+        probe = self._pending_probe
+        if probe is not None and probe.target_id == msg.from_shard_id:
+            self._pending_probe = None
+        return []
 
 
 __all__ = ["MembershipState", "PeerSpec"]
