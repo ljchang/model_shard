@@ -107,6 +107,7 @@ enum ErrorCode {
   ERR_WRONG_SHARD = 2;
   ERR_PROTOCOL_VERSION = 3;
   ERR_INTERNAL = 4;
+  ERR_SHARD_UNAVAILABLE = 5;  // Phase 2: a required shard is suspect/dead.
 }
 
 message Error {
@@ -114,6 +115,67 @@ message Error {
   string request_id = 2;
   ErrorCode code = 3;
   string detail = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 — SWIM membership messages.
+// All membership messages travel over a separate UDP transport (not the TCP
+// envelope used for activations). The framing is one protobuf-encoded
+// Envelope per UDP datagram. Datagrams must fit in a single 1400-byte MTU
+// budget. See src/model_shard/membership/transport.py.
+// ---------------------------------------------------------------------------
+
+message MemberRecordPb {
+  string shard_id = 1;
+  string host = 2;
+  uint32 udp_port = 3;
+  // 0 = alive, 1 = suspect, 2 = dead. Must match records.MemberState ordering.
+  uint32 state = 4;
+  uint64 incarnation = 5;
+}
+
+message Ping {
+  uint32 protocol_version = 1;
+  string from_shard_id = 2;
+  uint64 from_incarnation = 3;
+  // Up to K_GOSSIP recent membership transitions piggybacked.
+  repeated MemberRecordPb deltas = 4;
+}
+
+message Ack {
+  uint32 protocol_version = 1;
+  string from_shard_id = 2;
+  uint64 from_incarnation = 3;
+  repeated MemberRecordPb deltas = 4;
+}
+
+message PingReq {
+  uint32 protocol_version = 1;
+  string from_shard_id = 2;
+  string target_shard_id = 3;
+  // A correlation id so the requester can match the eventual PingReqAck.
+  string probe_id = 4;
+  repeated MemberRecordPb deltas = 5;
+}
+
+message PingReqAck {
+  uint32 protocol_version = 1;
+  string from_shard_id = 2;
+  string target_shard_id = 3;
+  string probe_id = 4;
+  bool success = 5;
+  repeated MemberRecordPb deltas = 6;
+}
+
+message Join {
+  uint32 protocol_version = 1;
+  MemberRecordPb self_record = 2;
+}
+
+message MembershipDelta {
+  uint32 protocol_version = 1;
+  // Full snapshot of the sender's view, used as one-shot bootstrap response.
+  repeated MemberRecordPb members = 2;
 }
 
 // ---------------------------------------------------------------------------
@@ -129,5 +191,12 @@ message Envelope {
     EndRequest end = 5;
     Error error = 6;
     SampledToken sampled_token = 7;
+    // Phase 2 SWIM membership messages.
+    Ping ping = 8;
+    Ack ack = 9;
+    PingReq ping_req = 10;
+    PingReqAck ping_req_ack = 11;
+    Join join = 12;
+    MembershipDelta membership_delta = 13;
   }
 }
