@@ -1,0 +1,118 @@
+syntax = "proto3";
+
+package model_shard.wire;
+
+// ---------------------------------------------------------------------------
+// Phase 1 wire protocol.
+//
+// Design rules:
+//   * All messages carry a protocol_version. Bump on breaking changes.
+//   * Large tensors travel OUT OF BAND: the protobuf message carries a
+//     TensorDescriptor (shape/dtype/quant), and the raw bytes follow the
+//     framed protobuf on the same TCP stream. The framing is defined in
+//     src/model_shard/transport.py, not here.
+//   * Fields are additive. New phases add fields; they do not reuse tag
+//     numbers.
+// ---------------------------------------------------------------------------
+
+enum DType {
+  DTYPE_UNSPECIFIED = 0;
+  DTYPE_FLOAT32 = 1;
+  DTYPE_FLOAT16 = 2;
+  DTYPE_BFLOAT16 = 3;
+  DTYPE_INT32 = 4;
+  DTYPE_INT8 = 5;
+  DTYPE_UINT8 = 6;
+}
+
+enum QuantScheme {
+  QUANT_NONE = 0;
+  QUANT_Q4_0 = 1;  // 4-bit, grouped (MLX default for gemma-4-26b-a4b-it-4bit)
+  QUANT_Q8_0 = 2;
+}
+
+message TensorDescriptor {
+  repeated int64 shape = 1;
+  DType dtype = 2;
+  QuantScheme quant = 3;
+  // Byte count of the accompanying out-of-band tensor payload.
+  // Receiver uses this to know exactly how many bytes to read after the
+  // protobuf frame.
+  uint64 byte_count = 4;
+}
+
+message SamplingParams {
+  // Phase 1: greedy only. Future phases add temperature/top_p/top_k.
+  bool greedy = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Control messages.
+// A wire frame is: [uint32 BE msg_len] [msg bytes] [uint32 BE tensor_len]
+//                   [tensor bytes].  tensor_len may be 0.
+// ---------------------------------------------------------------------------
+
+message BeginRequest {
+  uint32 protocol_version = 1;
+  string request_id = 2;    // unique per inference job (UUID string)
+  string sequence_id = 3;   // groups multi-token generation
+  repeated uint32 prompt_token_ids = 4;
+  SamplingParams sampling = 5;
+  // First layer this shard should execute. Usually 0 for the head node.
+  uint32 start_layer = 6;
+}
+
+message ContinueRequest {
+  uint32 protocol_version = 1;
+  string request_id = 2;
+  uint32 token_id = 3;      // the token just sampled
+  uint32 position = 4;      // its position in the sequence
+}
+
+message Activation {
+  uint32 protocol_version = 1;
+  string request_id = 2;
+  uint32 next_layer_idx = 3;   // the layer the RECEIVING node should run next
+  TensorDescriptor tensor = 4; // describes the accompanying tensor bytes
+}
+
+message Logits {
+  uint32 protocol_version = 1;
+  string request_id = 2;
+  TensorDescriptor tensor = 3;
+}
+
+message EndRequest {
+  uint32 protocol_version = 1;
+  string request_id = 2;
+}
+
+enum ErrorCode {
+  ERR_UNSPECIFIED = 0;
+  ERR_UNKNOWN_REQUEST = 1;
+  ERR_WRONG_SHARD = 2;
+  ERR_PROTOCOL_VERSION = 3;
+  ERR_INTERNAL = 4;
+}
+
+message Error {
+  uint32 protocol_version = 1;
+  string request_id = 2;
+  ErrorCode code = 3;
+  string detail = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Envelope. Nodes dispatch on which 'oneof' is set.
+// ---------------------------------------------------------------------------
+
+message Envelope {
+  oneof payload {
+    BeginRequest begin = 1;
+    ContinueRequest cont = 2;
+    Activation activation = 3;
+    Logits logits = 4;
+    EndRequest end = 5;
+    Error error = 6;
+  }
+}

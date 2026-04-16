@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+dist/
+build/
+
+# Generated protobuf stubs (committed for convenience, but can regen)
+# src/model_shard/_pb/*.py
+
+# Local model weights + artifacts
+artifacts/
+*.safetensors
+.cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
