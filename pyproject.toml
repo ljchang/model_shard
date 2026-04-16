@@ -55,3 +55,8 @@ exclude = ["src/model_shard/_pb/"]
 [[tool.mypy.overrides]]
 module = ["mlx.*", "mlx_vlm.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["model_shard._pb.*"]
+follow_imports = "skip"
+ignore_missing_imports = true

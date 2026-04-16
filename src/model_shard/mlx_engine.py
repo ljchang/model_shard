@@ -18,6 +18,9 @@ from functools import partial
 from typing import Any
 
 import mlx.core as mx
+import numpy as np
+
+from model_shard._pb import wire_pb2
 
 
 @dataclass
@@ -117,3 +120,44 @@ def finalize(lm: LoadedModel, h: mx.array) -> mx.array:
     if softcap is not None:
         logits = _softcap(softcap, logits)
     return logits  # type: ignore[no-any-return]
+
+
+# dtype enum (proto) → (mx dtype, numpy staging dtype, bytes-per-element)
+_DTYPE_MAP: dict[int, tuple[mx.Dtype, np.dtype, int]] = {
+    wire_pb2.DTYPE_FLOAT32: (mx.float32, np.dtype("float32"), 4),
+    wire_pb2.DTYPE_FLOAT16: (mx.float16, np.dtype("float16"), 2),
+    wire_pb2.DTYPE_BFLOAT16: (mx.bfloat16, np.dtype("uint16"), 2),  # staged as uint16
+    wire_pb2.DTYPE_INT32: (mx.int32, np.dtype("int32"), 4),
+    wire_pb2.DTYPE_INT8: (mx.int8, np.dtype("int8"), 1),
+    wire_pb2.DTYPE_UINT8: (mx.uint8, np.dtype("uint8"), 1),
+}
+
+
+def _mx_to_wire_dtype(dtype: mx.Dtype) -> int:
+    for wire, (mxt, _, _) in _DTYPE_MAP.items():
+        if mxt == dtype:
+            return wire
+    raise ValueError(f"unsupported mx dtype for wire: {dtype}")
+
+
+def tensor_to_bytes(arr: mx.array) -> bytes:
+    """Serialize an mx.array to raw bytes (no shape/dtype metadata — those go
+    in the accompanying TensorDescriptor).
+
+    bf16 is staged through uint16 because numpy's buffer protocol doesn't
+    handle bf16 directly.
+    """
+    staged = np.array(arr.view(mx.uint16)) if arr.dtype == mx.bfloat16 else np.array(arr)
+    return staged.tobytes()
+
+
+def bytes_to_tensor(raw: bytes, shape: list[int], dtype: int) -> mx.array:
+    """Rehydrate an mx.array from raw bytes + the TensorDescriptor metadata."""
+    if dtype not in _DTYPE_MAP:
+        raise ValueError(f"unsupported wire dtype: {dtype}")
+    mx_dtype, np_stage, _ = _DTYPE_MAP[dtype]
+    staged = np.frombuffer(raw, dtype=np_stage).reshape(shape)
+    arr = mx.array(staged)
+    if mx_dtype == mx.bfloat16:
+        arr = arr.view(mx.bfloat16)
+    return arr

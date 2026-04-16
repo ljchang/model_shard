@@ -1,8 +1,8 @@
 """Static YAML-backed shard directory.
 
-In Phase 1 this is hardcoded: a YAML file maps shard_id -> (host, port). Phases
-2+ will replace this with a gossip-driven, dynamically-updating map behind the
-same lookup() / all_shards() interface.
+In Phase 1 this is hardcoded: a YAML file maps shard_id -> ShardSpec (network
+address + layer range). Phases 2+ replace this with a gossip-driven,
+dynamically-updating map behind the same lookup() / all_shards() interface.
 
 Config format:
 
@@ -10,6 +10,8 @@ Config format:
       <shard_id>:
         host: <str>
         port: <int>
+        start_layer: <int>
+        end_layer: <int>    # half-open: [start_layer, end_layer)
 """
 
 from dataclasses import dataclass
@@ -24,11 +26,19 @@ class NodeAddress:
     port: int
 
 
+@dataclass(frozen=True)
+class ShardSpec:
+    shard_id: str
+    address: NodeAddress
+    start_layer: int
+    end_layer: int
+
+
 class ShardMap:
-    def __init__(self, entries: dict[str, NodeAddress]) -> None:
+    def __init__(self, entries: dict[str, ShardSpec]) -> None:
         self._entries = dict(entries)
 
-    def lookup(self, shard_id: str) -> NodeAddress:
+    def lookup(self, shard_id: str) -> ShardSpec:
         try:
             return self._entries[shard_id]
         except KeyError as e:
@@ -46,18 +56,43 @@ class ShardMap:
         if not isinstance(shards_cfg, dict):
             raise ValueError(f"'shards' in {path} must be a mapping")
 
-        entries: dict[str, NodeAddress] = {}
+        entries: dict[str, ShardSpec] = {}
         for shard_id, spec in shards_cfg.items():
             if not isinstance(spec, dict):
                 raise ValueError(f"shard {shard_id!r} entry must be a mapping")
-            if "host" not in spec:
-                raise ValueError(f"shard {shard_id!r} missing 'host'")
-            if "port" not in spec:
-                raise ValueError(f"shard {shard_id!r} missing 'port'")
+            for field in ("host", "port", "start_layer", "end_layer"):
+                if field not in spec:
+                    raise ValueError(f"shard {shard_id!r} missing {field!r}")
+
             port_raw = spec["port"]
             if not isinstance(port_raw, int) or isinstance(port_raw, bool):
                 raise ValueError(
                     f"shard {shard_id!r} has non-integer port {port_raw!r}"
                 )
-            entries[str(shard_id)] = NodeAddress(host=str(spec["host"]), port=port_raw)
+
+            start_layer = spec["start_layer"]
+            end_layer = spec["end_layer"]
+            if (
+                not isinstance(start_layer, int)
+                or not isinstance(end_layer, int)
+                or isinstance(start_layer, bool)
+                or isinstance(end_layer, bool)
+            ):
+                raise ValueError(
+                    f"shard {shard_id!r} has non-integer layer range "
+                    f"({start_layer!r}, {end_layer!r})"
+                )
+            if end_layer <= start_layer:
+                raise ValueError(
+                    f"shard {shard_id!r} has end_layer ({end_layer}) <= "
+                    f"start_layer ({start_layer})"
+                )
+
+            sid = str(shard_id)
+            entries[sid] = ShardSpec(
+                shard_id=sid,
+                address=NodeAddress(host=str(spec["host"]), port=port_raw),
+                start_layer=start_layer,
+                end_layer=end_layer,
+            )
         return cls(entries)

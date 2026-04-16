@@ -1,0 +1,19 @@
+# Phase 1 static shard map — 3-way partition of Gemma 4 26B A4B (30 layers)
+# across 3 localhost node processes.
+
+shards:
+  layer_0-10:
+    host: 127.0.0.1
+    port: 9001
+    start_layer: 0
+    end_layer: 10
+  layer_10-20:
+    host: 127.0.0.1
+    port: 9002
+    start_layer: 10
+    end_layer: 20
+  layer_20-30:
+    host: 127.0.0.1
+    port: 9003
+    start_layer: 20
+    end_layer: 30
