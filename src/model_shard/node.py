@@ -189,6 +189,16 @@ class Node:
             )
             return
 
+        unavailable = self._unavailable_peer()
+        if unavailable is not None:
+            _send_error(
+                client_stream,
+                req.request_id,
+                wire_pb2.ERR_SHARD_UNAVAILABLE,
+                f"shard {unavailable!r} not alive",
+            )
+            return
+
         cache = make_cache(self._lm)
         state = _HeadRequestState(
             client_stream=client_stream,
@@ -408,6 +418,16 @@ class Node:
     def _on_membership_change(self, transition: StateTransition) -> None:
         # Wired in Task 25 to drop/redial TCP peer connections.
         pass
+
+    def _unavailable_peer(self) -> str | None:
+        if self._membership is None:
+            return None
+        view = self._membership.state.view()
+        for sid in self._shard_map.all_shards():
+            rec = view.get(sid)
+            if rec is None or rec.state.name != "ALIVE":
+                return sid
+        return None
 
 
 # -------------------------------------------------------------------- helpers
