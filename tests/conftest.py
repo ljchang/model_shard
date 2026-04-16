@@ -11,6 +11,7 @@ import threading
 import time
 from collections.abc import Iterator
 from contextlib import closing
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
@@ -41,12 +42,21 @@ def _wait_for_listening(host: str, port: int, timeout: float = 5.0) -> None:
     raise TimeoutError(f"node at {host}:{port} never came up")
 
 
-@pytest.fixture(scope="session")
-def three_node_pipeline(loaded_model: Any) -> Iterator[Any]:
-    """3-node pipeline running in daemon threads; session-scoped to avoid
-    re-loading the model per test.
+@dataclass
+class DistributedCluster:
+    """Handle for an in-process 3-node cluster running in daemon threads."""
 
-    Yields the ShardMap that maps shard_id -> ShardSpec (with localhost ports).
+    shard_map: Any            # model_shard.shard_map.ShardMap
+    nodes_by_id: dict[str, Any]  # shard_id -> model_shard.node.Node
+
+
+@pytest.fixture(scope="session")
+def three_node_pipeline(loaded_model: Any) -> Iterator[DistributedCluster]:
+    """Session-scoped 3-node decentralized pipeline. Nodes know about each
+    other via a shared ShardMap and forward activations peer-to-peer.
+
+    Yields a DistributedCluster; tests that need per-node state (e.g., Tier 2
+    reading debug captures) reach into ``nodes_by_id``.
     """
     from model_shard.node import Node
     from model_shard.shard_map import NodeAddress, ShardMap, ShardSpec
@@ -72,21 +82,29 @@ def three_node_pipeline(loaded_model: Any) -> Iterator[Any]:
             end_layer=30,
         ),
     ]
-    nodes = [
-        Node(shard=spec, loaded_model=loaded_model, total_layers=loaded_model.num_layers)
+    shard_map = ShardMap({s.shard_id: s for s in specs})
+
+    nodes = {
+        spec.shard_id: Node(
+            shard=spec,
+            shard_map=shard_map,
+            loaded_model=loaded_model,
+            total_layers=loaded_model.num_layers,
+        )
         for spec in specs
+    }
+    threads = [
+        threading.Thread(target=n.serve_forever, daemon=True) for n in nodes.values()
     ]
-    threads = [threading.Thread(target=n.serve_forever, daemon=True) for n in nodes]
     for t in threads:
         t.start()
     for spec in specs:
         _wait_for_listening(spec.address.host, spec.address.port)
 
-    shard_map = ShardMap({s.shard_id: s for s in specs})
     try:
-        yield shard_map
+        yield DistributedCluster(shard_map=shard_map, nodes_by_id=nodes)
     finally:
-        for n in nodes:
+        for n in nodes.values():
             n.shutdown()
         for t in threads:
             t.join(timeout=2.0)

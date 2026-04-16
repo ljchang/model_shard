@@ -60,6 +60,9 @@ message BeginRequest {
   SamplingParams sampling = 5;
   // First layer this shard should execute. Usually 0 for the head node.
   uint32 start_layer = 6;
+  // How many tokens to generate before terminating the request. The head
+  // node tracks generation count and stops the decode loop when reached.
+  uint32 max_new_tokens = 7;
 }
 
 message ContinueRequest {
@@ -80,6 +83,17 @@ message Logits {
   uint32 protocol_version = 1;
   string request_id = 2;
   TensorDescriptor tensor = 3;
+}
+
+// Emitted by the tail node after sampling a token from logits. Flows
+// backward: tail -> head -> client. Logits themselves never cross the
+// network — only the sampled id, which is a few bytes.
+message SampledToken {
+  uint32 protocol_version = 1;
+  string request_id = 2;
+  uint32 token_id = 3;
+  uint32 position = 4;  // 0-indexed position within the generated sequence
+  bool is_final = 5;    // true on the last token of the request
 }
 
 message EndRequest {
@@ -114,5 +128,6 @@ message Envelope {
     Logits logits = 4;
     EndRequest end = 5;
     Error error = 6;
+    SampledToken sampled_token = 7;
   }
 }

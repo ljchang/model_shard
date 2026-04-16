@@ -1,8 +1,9 @@
-"""Tier 1 acceptance: distributed greedy tokens exactly match the single-process reference.
+"""Tier 1 acceptance: distributed greedy tokens exactly match the reference.
 
-Runs the orchestrator against a 3-node pipeline on all 5 canonical prompts
-from ``tests/prompts.json``. Compares the generated token sequences against
-the reference manifest captured by ``scripts/run_reference.py``.
+Streams tokens from a 3-node decentralized pipeline (client → head, nodes
+forward activations peer-to-peer, tail samples, tokens flow back to head
+and out to client). Compares to the reference manifest captured by
+``scripts/run_reference.py``.
 
 If the reference manifest doesn't exist, tests skip with a hint to run the
 capture script.
@@ -16,9 +17,8 @@ from typing import Any
 
 import pytest
 
-from model_shard.mlx_engine import LoadedModel
-from model_shard.orchestrator import Orchestrator
-from model_shard.shard_map import ShardMap
+from model_shard.client import Client
+from tests.conftest import DistributedCluster
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REFERENCE_MANIFEST = REPO_ROOT / "artifacts" / "ref" / "manifest.json"
@@ -39,8 +39,7 @@ def reference_manifest() -> dict[str, Any]:
 @pytest.mark.slow
 @pytest.mark.parametrize("prompt_idx", range(5))
 def test_tier1_distributed_tokens_match_reference(
-    loaded_model: LoadedModel,
-    three_node_pipeline: ShardMap,
+    three_node_pipeline: DistributedCluster,
     reference_manifest: dict[str, Any],
     prompt_idx: int,
 ) -> None:
@@ -48,12 +47,9 @@ def test_tier1_distributed_tokens_match_reference(
     prompt_tokens = list(record["prompt_tokens"])
     expected_prefix = list(record["generated_tokens"])[:TIER1_MAX_TOKENS]
 
-    orch = Orchestrator(
-        shard_map=three_node_pipeline,
-        total_layers=loaded_model.num_layers,
-        hidden_size=2816,
-    )
-    got = orch.generate_greedy(prompt_tokens, max_new_tokens=TIER1_MAX_TOKENS)
+    head = three_node_pipeline.shard_map.lookup("layer_0-10")
+    client = Client(head_address=head.address)
+    got = client.generate(prompt_tokens, max_new_tokens=TIER1_MAX_TOKENS)
 
     assert got == expected_prefix, (
         f"prompt {prompt_idx} ({record['text']!r}): "

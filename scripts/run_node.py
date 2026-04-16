@@ -59,7 +59,12 @@ def main() -> None:
             total_layers,
         )
 
-    node = Node(shard=shard, loaded_model=lm, total_layers=lm.num_layers)
+    node = Node(
+        shard=shard,
+        shard_map=shard_map,
+        loaded_model=lm,
+        total_layers=lm.num_layers,
+    )
 
     def _handle_signal(signum: int, _frame: FrameType | None) -> None:
         log.info("received signal %d, shutting down", signum)

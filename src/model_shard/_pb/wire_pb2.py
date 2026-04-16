@@ -24,35 +24,37 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\nwire.proto\x12\x10model_shard.wire\"\x8b\x01\n\x10TensorDescriptor\x12\r\n\x05shape\x18\x01 \x03(\x03\x12&\n\x05\x64type\x18\x02 \x01(\x0e\x32\x17.model_shard.wire.DType\x12,\n\x05quant\x18\x03 \x01(\x0e\x32\x1d.model_shard.wire.QuantScheme\x12\x12\n\nbyte_count\x18\x04 \x01(\x04\" \n\x0eSamplingParams\x12\x0e\n\x06greedy\x18\x01 \x01(\x08\"\xb4\x01\n\x0c\x42\x65ginRequest\x12\x18\n\x10protocol_version\x18\x01 \x01(\r\x12\x12\n\nrequest_id\x18\x02 \x01(\t\x12\x13\n\x0bsequence_id\x18\x03 \x01(\t\x12\x18\n\x10prompt_token_ids\x18\x04 \x03(\r\x12\x32\n\x08sampling\x18\x05 \x01(\x0b\x32 .model_shard.wire.SamplingParams\x12\x13\n\x0bstart_layer\x18\x06 \x01(\r\"c\n\x0f\x43ontinueRequest\x12\x18\n\x10protocol_version\x18\x01 \x01(\r\x12\x12\n\nrequest_id\x18\x02 \x01(\t\x12\x10\n\x08token_id\x18\x03 \x01(\r\x12\x10\n\x08position\x18\x04 \x01(\r\"\x86\x01\n\nActivation\x12\x18\n\x10protocol_version\x18\x01 \x01(\r\x12\x12\n\nrequest_id\x18\x02 \x01(\t\x12\x16\n\x0enext_layer_idx\x18\x03 \x01(\r\x12\x32\n\x06tensor\x18\x04 \x01(\x0b\x32\".model_shard.wire.TensorDescriptor\"j\n\x06Logits\x12\x18\n\x10protocol_version\x18\x01 \x01(\r\x12\x12\n\nrequest_id\x18\x02 \x01(\t\x12\x32\n\x06tensor\x18\x03 \x01(\x0b\x32\".model_shard.wire.TensorDescriptor\":\n\nEndRequest\x12\x18\n\x10protocol_version\x18\x01 \x01(\r\x12\x12\n\nrequest_id\x18\x02 \x01(\t\"p\n\x05\x45rror\x12\x18\n\x10protocol_version\x18\x01 \x01(\r\x12\x12\n\nrequest_id\x18\x02 \x01(\t\x12)\n\x04\x63ode\x18\x03 \x01(\x0e\x32\x1b.model_shard.wire.ErrorCode\x12\x0e\n\x06\x64\x65tail\x18\x04 \x01(\t\"\xb0\x02\n\x08\x45nvelope\x12/\n\x05\x62\x65gin\x18\x01 \x01(\x0b\x32\x1e.model_shard.wire.BeginRequestH\x00\x12\x31\n\x04\x63ont\x18\x02 \x01(\x0b\x32!.model_shard.wire.ContinueRequestH\x00\x12\x32\n\nactivation\x18\x03 \x01(\x0b\x32\x1c.model_shard.wire.ActivationH\x00\x12*\n\x06logits\x18\x04 \x01(\x0b\x32\x18.model_shard.wire.LogitsH\x00\x12+\n\x03\x65nd\x18\x05 \x01(\x0b\x32\x1c.model_shard.wire.EndRequestH\x00\x12(\n\x05\x65rror\x18\x06 \x01(\x0b\x32\x17.model_shard.wire.ErrorH\x00\x42\t\n\x07payload*\x8a\x01\n\x05\x44Type\x12\x15\n\x11\x44TYPE_UNSPECIFIED\x10\x00\x12\x11\n\rDTYPE_FLOAT32\x10\x01\x12\x11\n\rDTYPE_FLOAT16\x10\x02\x12\x12\n\x0e\x44TYPE_BFLOAT16\x10\x03\x12\x0f\n\x0b\x44TYPE_INT32\x10\x04\x12\x0e\n\nDTYPE_INT8\x10\x05\x12\x0f\n\x0b\x44TYPE_UINT8\x10\x06*=\n\x0bQuantScheme\x12\x0e\n\nQUANT_NONE\x10\x00\x12\x0e\n\nQUANT_Q4_0\x10\x01\x12\x0e\n\nQUANT_Q8_0\x10\x02*z\n\tErrorCode\x12\x13\n\x0f\x45RR_UNSPECIFIED\x10\x00\x12\x17\n\x13\x45RR_UNKNOWN_REQUEST\x10\x01\x12\x13\n\x0f\x45RR_WRONG_SHARD\x10\x02\x12\x18\n\x14\x45RR_PROTOCOL_VERSION\x10\x03\x12\x10\n\x0c\x45RR_INTERNAL\x10\x04\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\nwire.proto\x12\x10model_shard.wire\"\x8b\x01\n\x10TensorDescriptor\x12\r\n\x05shape\x18\x01 \x03(\x03\x12&\n\x05\x64type\x18\x02 \x01(\x0e\x32\x17.model_shard.wire.DType\x12,\n\x05quant\x18\x03 \x01(\x0e\x32\x1d.model_shard.wire.QuantScheme\x12\x12\n\nbyte_count\x18\x04 \x01(\x04\" \n\x0eSamplingParams\x12\x0e\n\x06greedy\x18\x01 \x01(\x08\"\xcc\x01\n\x0c\x42\x65ginRequest\x12\x18\n\x10protocol_version\x18\x01 \x01(\r\x12\x12\n\nrequest_id\x18\x02 \x01(\t\x12\x13\n\x0bsequence_id\x18\x03 \x01(\t\x12\x18\n\x10prompt_token_ids\x18\x04 \x03(\r\x12\x32\n\x08sampling\x18\x05 \x01(\x0b\x32 .model_shard.wire.SamplingParams\x12\x13\n\x0bstart_layer\x18\x06 \x01(\r\x12\x16\n\x0emax_new_tokens\x18\x07 \x01(\r\"c\n\x0f\x43ontinueRequest\x12\x18\n\x10protocol_version\x18\x01 \x01(\r\x12\x12\n\nrequest_id\x18\x02 \x01(\t\x12\x10\n\x08token_id\x18\x03 \x01(\r\x12\x10\n\x08position\x18\x04 \x01(\r\"\x86\x01\n\nActivation\x12\x18\n\x10protocol_version\x18\x01 \x01(\r\x12\x12\n\nrequest_id\x18\x02 \x01(\t\x12\x16\n\x0enext_layer_idx\x18\x03 \x01(\r\x12\x32\n\x06tensor\x18\x04 \x01(\x0b\x32\".model_shard.wire.TensorDescriptor\"j\n\x06Logits\x12\x18\n\x10protocol_version\x18\x01 \x01(\r\x12\x12\n\nrequest_id\x18\x02 \x01(\t\x12\x32\n\x06tensor\x18\x03 \x01(\x0b\x32\".model_shard.wire.TensorDescriptor\"r\n\x0cSampledToken\x12\x18\n\x10protocol_version\x18\x01 \x01(\r\x12\x12\n\nrequest_id\x18\x02 \x01(\t\x12\x10\n\x08token_id\x18\x03 \x01(\r\x12\x10\n\x08position\x18\x04 \x01(\r\x12\x10\n\x08is_final\x18\x05 \x01(\x08\":\n\nEndRequest\x12\x18\n\x10protocol_version\x18\x01 \x01(\r\x12\x12\n\nrequest_id\x18\x02 \x01(\t\"p\n\x05\x45rror\x12\x18\n\x10protocol_version\x18\x01 \x01(\r\x12\x12\n\nrequest_id\x18\x02 \x01(\t\x12)\n\x04\x63ode\x18\x03 \x01(\x0e\x32\x1b.model_shard.wire.ErrorCode\x12\x0e\n\x06\x64\x65tail\x18\x04 \x01(\t\"\xe9\x02\n\x08\x45nvelope\x12/\n\x05\x62\x65gin\x18\x01 \x01(\x0b\x32\x1e.model_shard.wire.BeginRequestH\x00\x12\x31\n\x04\x63ont\x18\x02 \x01(\x0b\x32!.model_shard.wire.ContinueRequestH\x00\x12\x32\n\nactivation\x18\x03 \x01(\x0b\x32\x1c.model_shard.wire.ActivationH\x00\x12*\n\x06logits\x18\x04 \x01(\x0b\x32\x18.model_shard.wire.LogitsH\x00\x12+\n\x03\x65nd\x18\x05 \x01(\x0b\x32\x1c.model_shard.wire.EndRequestH\x00\x12(\n\x05\x65rror\x18\x06 \x01(\x0b\x32\x17.model_shard.wire.ErrorH\x00\x12\x37\n\rsampled_token\x18\x07 \x01(\x0b\x32\x1e.model_shard.wire.SampledTokenH\x00\x42\t\n\x07payload*\x8a\x01\n\x05\x44Type\x12\x15\n\x11\x44TYPE_UNSPECIFIED\x10\x00\x12\x11\n\rDTYPE_FLOAT32\x10\x01\x12\x11\n\rDTYPE_FLOAT16\x10\x02\x12\x12\n\x0e\x44TYPE_BFLOAT16\x10\x03\x12\x0f\n\x0b\x44TYPE_INT32\x10\x04\x12\x0e\n\nDTYPE_INT8\x10\x05\x12\x0f\n\x0b\x44TYPE_UINT8\x10\x06*=\n\x0bQuantScheme\x12\x0e\n\nQUANT_NONE\x10\x00\x12\x0e\n\nQUANT_Q4_0\x10\x01\x12\x0e\n\nQUANT_Q8_0\x10\x02*z\n\tErrorCode\x12\x13\n\x0f\x45RR_UNSPECIFIED\x10\x00\x12\x17\n\x13\x45RR_UNKNOWN_REQUEST\x10\x01\x12\x13\n\x0f\x45RR_WRONG_SHARD\x10\x02\x12\x18\n\x14\x45RR_PROTOCOL_VERSION\x10\x03\x12\x10\n\x0c\x45RR_INTERNAL\x10\x04\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'wire_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_DTYPE']._serialized_start=1219
-  _globals['_DTYPE']._serialized_end=1357
-  _globals['_QUANTSCHEME']._serialized_start=1359
-  _globals['_QUANTSCHEME']._serialized_end=1420
-  _globals['_ERRORCODE']._serialized_start=1422
-  _globals['_ERRORCODE']._serialized_end=1544
+  _globals['_DTYPE']._serialized_start=1416
+  _globals['_DTYPE']._serialized_end=1554
+  _globals['_QUANTSCHEME']._serialized_start=1556
+  _globals['_QUANTSCHEME']._serialized_end=1617
+  _globals['_ERRORCODE']._serialized_start=1619
+  _globals['_ERRORCODE']._serialized_end=1741
   _globals['_TENSORDESCRIPTOR']._serialized_start=33
   _globals['_TENSORDESCRIPTOR']._serialized_end=172
   _globals['_SAMPLINGPARAMS']._serialized_start=174
   _globals['_SAMPLINGPARAMS']._serialized_end=206
   _globals['_BEGINREQUEST']._serialized_start=209
-  _globals['_BEGINREQUEST']._serialized_end=389
-  _globals['_CONTINUEREQUEST']._serialized_start=391
-  _globals['_CONTINUEREQUEST']._serialized_end=490
-  _globals['_ACTIVATION']._serialized_start=493
-  _globals['_ACTIVATION']._serialized_end=627
-  _globals['_LOGITS']._serialized_start=629
-  _globals['_LOGITS']._serialized_end=735
-  _globals['_ENDREQUEST']._serialized_start=737
-  _globals['_ENDREQUEST']._serialized_end=795
-  _globals['_ERROR']._serialized_start=797
-  _globals['_ERROR']._serialized_end=909
-  _globals['_ENVELOPE']._serialized_start=912
-  _globals['_ENVELOPE']._serialized_end=1216
+  _globals['_BEGINREQUEST']._serialized_end=413
+  _globals['_CONTINUEREQUEST']._serialized_start=415
+  _globals['_CONTINUEREQUEST']._serialized_end=514
+  _globals['_ACTIVATION']._serialized_start=517
+  _globals['_ACTIVATION']._serialized_end=651
+  _globals['_LOGITS']._serialized_start=653
+  _globals['_LOGITS']._serialized_end=759
+  _globals['_SAMPLEDTOKEN']._serialized_start=761
+  _globals['_SAMPLEDTOKEN']._serialized_end=875
+  _globals['_ENDREQUEST']._serialized_start=877
+  _globals['_ENDREQUEST']._serialized_end=935
+  _globals['_ERROR']._serialized_start=937
+  _globals['_ERROR']._serialized_end=1049
+  _globals['_ENVELOPE']._serialized_start=1052
+  _globals['_ENVELOPE']._serialized_end=1413
 # @@protoc_insertion_point(module_scope)
