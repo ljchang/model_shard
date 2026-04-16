@@ -133,12 +133,14 @@ class MembershipState:
         # 2. Promote suspects to dead if deadline has passed.
         out.extend(self._maybe_promote_dead(now))
 
-        # 3. Escalate pending probe to indirect ping-req if ack overdue.
-        out.extend(self._maybe_escalate_probe(now))
-
-        # 4. Start a new protocol period if it's time.
+        # 3. Start a new protocol period if it's time. This must run before
+        #    escalation so that a new period resets the probe — preventing the
+        #    escalation of the just-started probe in the same tick.
         if now >= self._next_period_at:
             out.extend(self._start_protocol_period(now))
+
+        # 4. Escalate pending probe to indirect ping-req if ack overdue.
+        out.extend(self._maybe_escalate_probe(now))
 
         return out
 
@@ -188,6 +190,11 @@ class MembershipState:
         self._pending_probe = replace(
             probe, indirect_sent_at=now, indirect_targets=chosen
         )
+        # If no indirect helpers are available, we cannot wait for PingReqAcks
+        # that will never arrive — immediately promote the target to SUSPECT.
+        if not chosen:
+            self._mark_suspect(probe.target_id, now)
+            self._pending_probe = None
         return out
 
     def _start_protocol_period(self, now: float) -> list[OutgoingMessage]:
