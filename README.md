@@ -31,6 +31,20 @@ pending RPCs immediately when a peer leaves `ALIVE`. Set `ENABLE_EXPERT_SHARD=fa
 (default) to bypass and reproduce Phase 2 behavior. See
 `docs/superpowers/specs/2026-04-16-phase3-expert-sharding-design.md`.
 
+## Phase 5a status: Partial Expert Weight Loading — complete
+
+A node can now load only the routed experts listed in its shard's `moe_experts`
+YAML instead of the full 128-expert stack per layer. Opt-in via
+`ENABLE_PARTIAL_LOAD=true`. Resident memory per shard drops from ~14 GB to
+chassis (~4.5 GB) + `k/128 × 9 GB` for routed experts, which is the unlock for
+eventual 24 GB-VRAM deployments. Correctness is proven by
+`tests/test_partial_load_bit_exact_per_expert.py` (per-expert bit-exact vs
+full load) and `tests/test_partial_load_split_equivalence.py` (three mod-3
+sliced shards compose bit-exact to atomic layer 15). `run_selected_experts`
+handles the global→local expert-id translation; stock mlx-vlm `Experts` /
+`SwitchLinear` modules are untouched. See
+`docs/superpowers/specs/2026-04-17-phase5a-partial-expert-loading-design.md`.
+
 ## Phase 4 status: Load-Aware Routing — complete
 
 Nodes now gossip a compact queue-depth EMA to each other via `LoadReport` piggybacked
