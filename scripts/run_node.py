@@ -56,6 +56,13 @@ def _start_membership_debug_endpoint(node: Node, debug_port: int) -> None:
                         }
                         for sid, lr in handler_node.membership.latest_loads().items()
                     }
+                    # Include this node's own load so the view is complete.
+                    # latest_loads() is peer-only by design (caches inbound).
+                    self_lr = handler_node.self_load_report()
+                    payload[self_lr.shard_id] = {
+                        "queue_depth_ema": self_lr.queue_depth_ema,
+                        "ts_unix_ms": self_lr.ts_unix_ms,
+                    }
             else:
                 self.send_response(404)
                 self.end_headers()

@@ -643,6 +643,17 @@ class Node:
     def membership(self) -> MembershipRunner | None:
         return self._membership
 
+    def self_load_report(self) -> LoadReportRecord:
+        """Return a fresh load report for this node. Used by the /loads debug
+        endpoint so callers see a complete view including the local shard —
+        ``MembershipRunner.latest_loads()`` is peer-only by design (it caches
+        reports received over the wire)."""
+        return LoadReportRecord(
+            shard_id=self._shard.shard_id,
+            queue_depth_ema=self._load_tracker.report(),
+            ts_unix_ms=int(time.time() * 1000),
+        )
+
     def _build_expert_orchestrator(self) -> ExpertOrchestrator:
         """Construct an ExpertOrchestrator that fans out to peers via TCP.
 
