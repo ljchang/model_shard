@@ -30,3 +30,16 @@ In-flight peer failure surfaces as `ExpertRpcFailure` in the orchestrator and be
 pending RPCs immediately when a peer leaves `ALIVE`. Set `ENABLE_EXPERT_SHARD=false`
 (default) to bypass and reproduce Phase 2 behavior. See
 `docs/superpowers/specs/2026-04-16-phase3-expert-sharding-design.md`.
+
+## Phase 4 status: Load-Aware Routing — complete
+
+Nodes now gossip a compact queue-depth EMA to each other via `LoadReport` piggybacked
+on existing SWIM `Ping`/`Ack` messages. When `moe_experts` in `config/shards.yaml`
+lists an expert on multiple shards, `ExpertOrchestrator` routes each top-k dispatch
+to the less-loaded candidate via power-of-two-choices. The default config overlaps
+experts 0, 1, and 2 across two shards each for a live multi-candidate scenario;
+routing correctness is verified by `tests/test_routing_correctness.py`, and gossip
+delivery is verified end-to-end by `tests/test_expert_rpc_load_shift.py` via a new
+`/loads` debug endpoint (served alongside `/membership` at `tcp_port + 2000`). No
+new env var — the behavior auto-activates when `moe_experts` has overlapping entries.
+See `docs/superpowers/specs/2026-04-16-phase4-load-aware-routing-design.md`.

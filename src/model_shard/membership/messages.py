@@ -45,7 +45,7 @@ def _record_from_pb(pb: wire_pb2.MemberRecordPb) -> MemberRecord:
     )
 
 
-def _load_to_pb(r: LoadReportRecord) -> "wire_pb2.LoadReport":
+def _load_to_pb(r: LoadReportRecord) -> wire_pb2.LoadReport:
     return wire_pb2.LoadReport(
         shard_id=r.shard_id,
         queue_depth_ema=r.queue_depth_ema,
@@ -53,7 +53,7 @@ def _load_to_pb(r: LoadReportRecord) -> "wire_pb2.LoadReport":
     )
 
 
-def _load_from_pb(pb: "wire_pb2.LoadReport") -> LoadReportRecord:
+def _load_from_pb(pb: wire_pb2.LoadReport) -> LoadReportRecord:
     return LoadReportRecord(
         shard_id=pb.shard_id,
         queue_depth_ema=int(pb.queue_depth_ema),
