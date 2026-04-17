@@ -321,6 +321,147 @@ class ExpertOrchestrator:
             with contextlib.suppress(Exception):
                 fut.cancel()
 
+    def _phase_b_with_retry(
+        self,
+        post_attn: mx.array,
+        all_ids: list[int],
+        layer_idx: int,
+        request_id: str,
+        initial_local_ids: list[int],
+        lm: Any,
+    ) -> dict[int, mx.array]:
+        """Run the peer fan-out with retries on ``ExpertRpcFailure``.
+
+        Preserves partial outputs across retries: experts that already
+        completed (in ``outputs``) are never re-dispatched. Each retry
+        excludes peers that previously failed in THIS invocation.
+        """
+        import time as _time
+
+        # ids we still need outputs for (local ids handled by caller).
+        remote_ids_needed = [e for e in all_ids if e not in initial_local_ids]
+
+        # Initial routing.
+        peer_loads = self.loads_provider()
+        self_load = peer_loads.get(self.self_shard_id, 0)
+        by_owner = group_expert_ids_by_owner_loaded(
+            remote_ids_needed,
+            owners=self.owners,
+            peer_loads=peer_loads,
+            self_shard_id=self.self_shard_id,
+            self_load=self_load,
+            rng=self.rng,
+            live_owners_provider=self.live_owners_provider,
+        )
+        local_ids_extra = by_owner.pop(self.self_shard_id, [])
+        outputs: dict[int, mx.array] = {}
+        if local_ids_extra:
+            with self._mlx_guard():
+                outputs.update(
+                    run_selected_experts(lm, post_attn, layer_idx, local_ids_extra)
+                )
+
+        futures: dict[str, Future[dict[int, mx.array]]] = {
+            peer: self._executor.submit(
+                self.peer_rpc.call, peer, request_id, layer_idx, ids, post_attn
+            )
+            for peer, ids in by_owner.items()
+        }
+        abort_events: dict[str, threading.Event] = {
+            peer: threading.Event() for peer in futures
+        }
+        if abort_events:
+            with self._in_flight_lock:
+                self._in_flight[request_id] = abort_events
+
+        excluded_peers: set[str] = set()
+        attempts = 0
+        try:
+            while True:
+                attempts += 1
+                try:
+                    self._gather_with_abort(
+                        futures, abort_events, outputs, layer_idx
+                    )
+                    break
+                except ExpertRpcFailure as exc:
+                    if attempts >= self.retry_max_attempts:
+                        raise
+                    excluded_peers.add(exc.failed_peer)
+                    backoff_idx = min(
+                        attempts - 1, max(0, len(self.retry_backoff_ms) - 1)
+                    )
+                    if self.retry_backoff_ms:
+                        _time.sleep(self.retry_backoff_ms[backoff_idx] / 1000.0)
+
+                    # Drain any survivor futures that already completed so
+                    # their experts are counted as done before we compute
+                    # what's missing (avoids re-dispatching them).
+                    for peer, fut in futures.items():
+                        if peer != exc.failed_peer and fut.done():
+                            with contextlib.suppress(Exception):
+                                outputs.update(fut.result())
+
+                    missing = [e for e in remote_ids_needed if e not in outputs]
+                    if not missing:
+                        break
+
+                    def _filtered_provider(eid: int) -> set[str]:
+                        base = (
+                            self.live_owners_provider(eid)
+                            if self.live_owners_provider is not None
+                            else set()
+                        )
+                        return base - excluded_peers
+
+                    filtered_owners = {
+                        sid: ids for sid, ids in self.owners.items()
+                        if sid not in excluded_peers
+                    }
+                    try:
+                        by_owner_retry = group_expert_ids_by_owner_loaded(
+                            missing,
+                            owners=filtered_owners,
+                            peer_loads=self.loads_provider(),
+                            self_shard_id=self.self_shard_id,
+                            self_load=self.loads_provider().get(
+                                self.self_shard_id, 0
+                            ),
+                            rng=self.rng,
+                            live_owners_provider=_filtered_provider,
+                        )
+                    except KeyError:
+                        # All remaining owners for some expert have been
+                        # excluded — re-raise the original failure.
+                        raise exc from None
+                    local_retry = by_owner_retry.pop(self.self_shard_id, [])
+                    if local_retry:
+                        with self._mlx_guard():
+                            outputs.update(
+                                run_selected_experts(
+                                    lm, post_attn, layer_idx, local_retry
+                                )
+                            )
+                    futures = {
+                        peer: self._executor.submit(
+                            self.peer_rpc.call,
+                            peer, request_id, layer_idx, ids, post_attn,
+                        )
+                        for peer, ids in by_owner_retry.items()
+                    }
+                    abort_events = {
+                        peer: threading.Event() for peer in futures
+                    }
+                    if abort_events:
+                        with self._in_flight_lock:
+                            self._in_flight[request_id] = abort_events
+        finally:
+            if abort_events:
+                with self._in_flight_lock:
+                    self._in_flight.pop(request_id, None)
+
+        return outputs
+
     def run_split_layer(
         self,
         lm: Any,
@@ -365,33 +506,17 @@ class ExpertOrchestrator:
             # default stream while our local graph is still being built.
             mx.eval(post_attn, shared_out, *local_outputs.values())
 
-        # Phase B — peer fan-out. Lock is deliberately not held here: peer
-        # threads need to acquire it to run their experts.
+        # Phase B — peer fan-out with retry on peer failure.
         outputs: dict[int, mx.array] = dict(local_outputs)
-        futures: dict[str, Future[dict[int, mx.array]]] = {
-            peer: self._executor.submit(
-                self.peer_rpc.call, peer, request_id, layer_idx, ids, post_attn
-            )
-            for peer, ids in by_owner.items()
-        }
-        # Register per-peer abort events under this request_id so the
-        # membership observer (via notify_peer_left_alive) can signal us to
-        # stop waiting. We keep the registration even with no peers because
-        # notify_peer_left_alive iterates defensively.
-        abort_events: dict[str, threading.Event] = {
-            peer: threading.Event() for peer in futures
-        }
-        if abort_events:
-            with self._in_flight_lock:
-                self._in_flight[request_id] = abort_events
-        try:
-            self._gather_with_abort(
-                futures, abort_events, outputs, layer_idx
-            )
-        finally:
-            if abort_events:
-                with self._in_flight_lock:
-                    self._in_flight.pop(request_id, None)
+        remote_outputs = self._phase_b_with_retry(
+            post_attn=post_attn,
+            all_ids=all_ids,
+            layer_idx=layer_idx,
+            request_id=request_id,
+            initial_local_ids=local_ids,
+            lm=lm,
+        )
+        outputs.update(remote_outputs)
 
         # Phase C — aggregation + outer ops. Re-acquire the lock for the
         # final graph construction.
