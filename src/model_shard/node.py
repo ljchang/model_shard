@@ -87,12 +87,30 @@ class Node:
         self,
         shard: ShardSpec,
         shard_map: ShardMap,
-        loaded_model: LoadedModel,
-        total_layers: int,
+        loaded_model: LoadedModel | None = None,
+        total_layers: int = 0,
     ) -> None:
         self._shard = shard
         self._shard_map = shard_map
-        self._lm = loaded_model
+        # Phase 5a: when ENABLE_PARTIAL_LOAD is set AND the caller did not
+        # pass a pre-loaded model AND this shard actually hosts routed
+        # experts, build the model via ``load_model_partial`` so only the
+        # held expert slices are materialized. Otherwise preserve the prior
+        # contract (caller-supplied model).
+        if loaded_model is None and _partial_load_enabled() and shard.moe_experts:
+            from model_shard.mlx_engine import load_model_partial
+            held = {k: list(v) for k, v in shard.moe_experts.items()}
+            self._lm: LoadedModel = load_model_partial(
+                "mlx-community/gemma-4-26b-a4b-it-4bit",
+                held,
+            )
+        else:
+            # Pre-Phase-5a contract: caller is responsible for supplying a
+            # fully-loaded model. Type is narrowed to ``LoadedModel`` — if a
+            # caller passes ``None`` without flipping the partial-load gate,
+            # subsequent attribute access on ``self._lm`` will fail loudly,
+            # which matches prior behavior.
+            self._lm = cast(LoadedModel, loaded_model)
         self._total_layers = total_layers
         self._downstream: ShardSpec = _resolve_downstream(shard, shard_map, total_layers)
 
@@ -849,6 +867,15 @@ def _expert_shard_enabled() -> bool:
     """Phase 3 expert sharding gate. Default OFF so Phase 1/2 tests are
     unaffected; the Phase 3 fixture flips it on before constructing nodes."""
     return os.environ.get("ENABLE_EXPERT_SHARD", "false").lower() in ("1", "true", "yes")
+
+
+def _partial_load_enabled() -> bool:
+    """Phase 5a partial-expert-load gate. Default OFF so Phase 1-4 callers
+    that pass a pre-loaded model (or do not populate ``moe_experts``) keep
+    behaving exactly as before. When ON, ``Node.__init__`` skips the
+    pre-loaded-model path and instead calls ``load_model_partial`` using
+    ``shard.moe_experts`` as the held-expert map."""
+    return os.environ.get("ENABLE_PARTIAL_LOAD", "false").lower() in ("1", "true", "yes")
 
 
 __all__ = ["Node"]
