@@ -11,6 +11,7 @@ from model_shard.membership.records import (
     AckMsg,
     IncomingMessage,
     JoinMsg,
+    LoadReportRecord,
     MemberRecord,
     MembershipDeltaMsg,
     MemberState,
@@ -44,6 +45,22 @@ def _record_from_pb(pb: wire_pb2.MemberRecordPb) -> MemberRecord:
     )
 
 
+def _load_to_pb(r: LoadReportRecord) -> "wire_pb2.LoadReport":
+    return wire_pb2.LoadReport(
+        shard_id=r.shard_id,
+        queue_depth_ema=r.queue_depth_ema,
+        ts_unix_ms=r.ts_unix_ms,
+    )
+
+
+def _load_from_pb(pb: "wire_pb2.LoadReport") -> LoadReportRecord:
+    return LoadReportRecord(
+        shard_id=pb.shard_id,
+        queue_depth_ema=int(pb.queue_depth_ema),
+        ts_unix_ms=int(pb.ts_unix_ms),
+    )
+
+
 def encode_membership_envelope(msg: IncomingMessage) -> bytes:
     env = wire_pb2.Envelope()
     if isinstance(msg, PingMsg):
@@ -51,17 +68,20 @@ def encode_membership_envelope(msg: IncomingMessage) -> bytes:
         env.ping.from_shard_id = msg.from_shard_id
         env.ping.from_incarnation = msg.from_incarnation
         env.ping.deltas.extend(_record_to_pb(d) for d in msg.deltas)
+        env.ping.loads.extend(_load_to_pb(lr) for lr in msg.loads)
     elif isinstance(msg, AckMsg):
         env.ack.protocol_version = _PROTOCOL_VERSION
         env.ack.from_shard_id = msg.from_shard_id
         env.ack.from_incarnation = msg.from_incarnation
         env.ack.deltas.extend(_record_to_pb(d) for d in msg.deltas)
+        env.ack.loads.extend(_load_to_pb(lr) for lr in msg.loads)
     elif isinstance(msg, PingReqMsg):
         env.ping_req.protocol_version = _PROTOCOL_VERSION
         env.ping_req.from_shard_id = msg.from_shard_id
         env.ping_req.target_shard_id = msg.target_shard_id
         env.ping_req.probe_id = msg.probe_id
         env.ping_req.deltas.extend(_record_to_pb(d) for d in msg.deltas)
+        env.ping_req.loads.extend(_load_to_pb(lr) for lr in msg.loads)
     elif isinstance(msg, PingReqAckMsg):
         env.ping_req_ack.protocol_version = _PROTOCOL_VERSION
         env.ping_req_ack.from_shard_id = msg.from_shard_id
@@ -69,6 +89,7 @@ def encode_membership_envelope(msg: IncomingMessage) -> bytes:
         env.ping_req_ack.probe_id = msg.probe_id
         env.ping_req_ack.success = msg.success
         env.ping_req_ack.deltas.extend(_record_to_pb(d) for d in msg.deltas)
+        env.ping_req_ack.loads.extend(_load_to_pb(lr) for lr in msg.loads)
     elif isinstance(msg, JoinMsg):
         env.join.protocol_version = _PROTOCOL_VERSION
         env.join.self_record.CopyFrom(_record_to_pb(msg.self_record))
@@ -89,12 +110,14 @@ def decode_membership_envelope(raw: bytes) -> IncomingMessage | None:
             from_shard_id=env.ping.from_shard_id,
             from_incarnation=int(env.ping.from_incarnation),
             deltas=[_record_from_pb(d) for d in env.ping.deltas],
+            loads=[_load_from_pb(lr) for lr in env.ping.loads],
         )
     if which == "ack":
         return AckMsg(
             from_shard_id=env.ack.from_shard_id,
             from_incarnation=int(env.ack.from_incarnation),
             deltas=[_record_from_pb(d) for d in env.ack.deltas],
+            loads=[_load_from_pb(lr) for lr in env.ack.loads],
         )
     if which == "ping_req":
         return PingReqMsg(
@@ -102,6 +125,7 @@ def decode_membership_envelope(raw: bytes) -> IncomingMessage | None:
             target_shard_id=env.ping_req.target_shard_id,
             probe_id=env.ping_req.probe_id,
             deltas=[_record_from_pb(d) for d in env.ping_req.deltas],
+            loads=[_load_from_pb(lr) for lr in env.ping_req.loads],
         )
     if which == "ping_req_ack":
         return PingReqAckMsg(
@@ -110,6 +134,7 @@ def decode_membership_envelope(raw: bytes) -> IncomingMessage | None:
             probe_id=env.ping_req_ack.probe_id,
             success=bool(env.ping_req_ack.success),
             deltas=[_record_from_pb(d) for d in env.ping_req_ack.deltas],
+            loads=[_load_from_pb(lr) for lr in env.ping_req_ack.loads],
         )
     if which == "join":
         return JoinMsg(self_record=_record_from_pb(env.join.self_record))

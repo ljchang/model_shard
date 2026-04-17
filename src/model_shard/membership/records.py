@@ -33,6 +33,13 @@ class MemberRecord:
 
 
 @dataclass(frozen=True)
+class LoadReportRecord:
+    shard_id: str
+    queue_depth_ema: int  # EMA x 100
+    ts_unix_ms: int
+
+
+@dataclass(frozen=True)
 class StateTransition:
     """Emitted from `MembershipState` whenever a member's recorded state changes.
 
@@ -53,6 +60,7 @@ class PingMsg:
     from_shard_id: str
     from_incarnation: int
     deltas: list[MemberRecord]
+    loads: list[LoadReportRecord] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -60,6 +68,7 @@ class AckMsg:
     from_shard_id: str
     from_incarnation: int
     deltas: list[MemberRecord]
+    loads: list[LoadReportRecord] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -68,6 +77,7 @@ class PingReqMsg:
     target_shard_id: str
     probe_id: str
     deltas: list[MemberRecord]
+    loads: list[LoadReportRecord] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -77,6 +87,7 @@ class PingReqAckMsg:
     probe_id: str
     success: bool
     deltas: list[MemberRecord]
+    loads: list[LoadReportRecord] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -109,6 +120,7 @@ __all__ = [
     "AckMsg",
     "IncomingMessage",
     "JoinMsg",
+    "LoadReportRecord",
     "MemberRecord",
     "MemberState",
     "MembershipDeltaMsg",
