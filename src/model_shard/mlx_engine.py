@@ -103,6 +103,8 @@ def run_layers(
     split_layers: set[int] | None = None,
     orchestrator: Any = None,
     request_id: str = "",
+    provenance_chain: list[Any] | None = None,
+    node_id: str = "",
 ) -> mx.array:
     """Run transformer layers in the half-open range [start_layer, end_layer).
 
@@ -112,6 +114,11 @@ def run_layers(
     For ``i in split_layers``, delegate to ``orchestrator.run_split_layer``.
     All other layers run atomically (Phase 1 behavior). ``split_layers=None``
     is equivalent to an empty set.
+
+    ``provenance_chain`` and ``node_id`` are optional Phase 6-B kwargs.
+    When ``provenance_chain`` is not None, an OP_LAYER_ATOMIC entry is
+    appended for each atomic (non-split) layer after execution. Existing
+    callers that omit these kwargs are unaffected.
     """
     tm = lm.text_model
     split = split_layers or set()
@@ -128,12 +135,25 @@ def run_layers(
                 cache=cache,
                 masks=(global_mask, sliding_mask),
                 request_id=request_id,
+                provenance_chain=provenance_chain,
             )
         else:
             layer = tm.layers[i]
             c = cache[tm.layer_idx_to_cache_idx[i]]
             mask = global_mask if layer.layer_type == "full_attention" else sliding_mask
             h = layer(h, mask, c, per_layer_input=None)
+            if provenance_chain is not None:
+                from model_shard.provenance import build_entry
+                from model_shard.request import OpDescriptor, OpType
+                prev_hash = provenance_chain[-1].hash if provenance_chain else b""
+                provenance_chain.append(
+                    build_entry(
+                        node_id=node_id,
+                        op=OpDescriptor(op_type=OpType.OP_LAYER_ATOMIC, layer_idx=i),
+                        output_tensor=h,
+                        parent_hashes=(prev_hash,) if prev_hash else (),
+                    )
+                )
     return h
 
 

@@ -401,7 +401,10 @@ class Node:
             )
 
         try:
-            h = self._run_my_layers(h, cache, request_id=req.request_id)
+            h = self._run_my_layers(
+                h, cache, request_id=req.request_id,
+                provenance_chain=provenance_chain if self._provenance_enabled else None,
+            )
         except ExpertRpcFailure as exc:
             _LOG.warning("prefill aborted by expert RPC failure: %s", exc)
             with contextlib.suppress(OSError):
@@ -415,7 +418,7 @@ class Node:
                 self._kv_caches.pop(req.request_id, None)
                 self._head_states.pop(req.request_id, None)
             return
-        self._forward_activation(req.request_id, h, provenance_chain=provenance_chain or None)
+        self._forward_activation(req.request_id, h, provenance_chain=provenance_chain if self._provenance_enabled else None)
 
         # Decode loop. Blocks on the queue until the tail returns tokens.
         self._drive_decode_loop(req.request_id, state)
@@ -448,8 +451,25 @@ class Node:
                 with self._state_lock:
                     cache = self._kv_caches[request_id]
                 h = embed_tokens(self._lm, mx.array([[token_id]]))
-                h = self._run_my_layers(h, cache, request_id=request_id)
-                self._forward_activation(request_id, h)
+
+                decode_chain: list[ProvenanceEntry] | None = None
+                if self._provenance_enabled:
+                    from model_shard.provenance import build_entry
+                    from model_shard.request import OpDescriptor, OpType
+                    decode_chain = [
+                        build_entry(
+                            node_id=self._shard.shard_id,
+                            op=OpDescriptor(op_type=OpType.OP_EMBED),
+                            output_tensor=h,
+                            parent_hashes=(),
+                        )
+                    ]
+
+                h = self._run_my_layers(
+                    h, cache, request_id=request_id,
+                    provenance_chain=decode_chain,
+                )
+                self._forward_activation(request_id, h, provenance_chain=decode_chain)
 
             # Clean up everywhere.
             self._broadcast_end(request_id)
@@ -540,8 +560,19 @@ class Node:
         h = bytes_to_tensor(
             tensor_bytes, shape=list(act.tensor.shape), dtype=act.tensor.dtype
         )
+
+        # Build a local provenance chain seeded from the inbound chain so that
+        # _run_my_layers can append OP_LAYER_ATOMIC entries for this shard.
+        local_chain: list[ProvenanceEntry] | None = None
+        if self._provenance_enabled:
+            from model_shard.provenance import entry_from_pb
+            local_chain = [entry_from_pb(p) for p in act.provenance] if len(act.provenance) > 0 else []
+
         try:
-            h = self._run_my_layers(h, cache, request_id=act.request_id)
+            h = self._run_my_layers(
+                h, cache, request_id=act.request_id,
+                provenance_chain=local_chain,
+            )
         except ExpertRpcFailure as exc:
             # Reuse the Phase 2 broken-pipe pattern: send an Error envelope
             # back upstream on the inbound connection and close both the
@@ -570,10 +601,9 @@ class Node:
         if self.is_tail:
             logits = finalize(self._lm, h)
             if self._provenance_enabled:
-                from model_shard.provenance import build_entry, entry_from_pb
+                from model_shard.provenance import build_entry
                 from model_shard.request import OpDescriptor, OpType
-                inbound_chain = [entry_from_pb(p) for p in act.provenance] if len(act.provenance) > 0 else []
-                parent_hashes = (inbound_chain[-1].hash,) if inbound_chain else ()
+                parent_hashes = (local_chain[-1].hash,) if local_chain else ()
                 finalize_entry = build_entry(
                     node_id=self._shard.shard_id,
                     op=OpDescriptor(op_type=OpType.OP_FINALIZE),
@@ -585,7 +615,7 @@ class Node:
             # Position is managed by the head; we leave it 0 here.
             self._send_sampled_token(act.request_id, token_id, position=0)
         else:
-            self._forward_activation(act.request_id, h)
+            self._forward_activation(act.request_id, h, provenance_chain=local_chain)
 
     def _handle_sampled_token(self, tok: wire_pb2.SampledToken) -> None:
         """Only the head should receive inbound SampledTokens (from the tail)."""
@@ -818,7 +848,11 @@ class Node:
     # ------------------------------------------------------------ forwarding
 
     def _run_my_layers(
-        self, h: mx.array, cache: list[Any], request_id: str = ""
+        self,
+        h: mx.array,
+        cache: list[Any],
+        request_id: str = "",
+        provenance_chain: list[ProvenanceEntry] | None = None,
     ) -> mx.array:
         global_mask, sliding_mask = make_masks(self._lm, h, cache)
         return run_layers(
@@ -832,6 +866,8 @@ class Node:
             split_layers=self._split_layers,
             orchestrator=self._orchestrator,
             request_id=request_id,
+            provenance_chain=provenance_chain,
+            node_id=self._shard.shard_id,
         )
 
     def _forward_activation(
