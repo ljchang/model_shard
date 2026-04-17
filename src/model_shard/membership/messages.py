@@ -9,12 +9,14 @@ from __future__ import annotations
 from model_shard._pb import wire_pb2
 from model_shard.membership.records import (
     AckMsg,
+    HeatReportRecord,
     IncomingMessage,
     JoinMsg,
     LoadReportRecord,
     MemberRecord,
     MembershipDeltaMsg,
     MemberState,
+    OwnershipDeltaRecord,
     PingMsg,
     PingReqAckMsg,
     PingReqMsg,
@@ -61,6 +63,50 @@ def _load_from_pb(pb: wire_pb2.LoadReport) -> LoadReportRecord:
     )
 
 
+def _heat_to_pb(r: HeatReportRecord) -> wire_pb2.ExpertHeatReport:
+    pb = wire_pb2.ExpertHeatReport(
+        shard_id=r.shard_id,
+        ts_unix_ms=r.ts_unix_ms,
+    )
+    for layer_idx, expert_id, ema in r.entries:
+        e = pb.entries.add()
+        e.layer_idx = layer_idx
+        e.expert_id = expert_id
+        e.heat_ema_x100 = ema
+    return pb
+
+
+def _heat_from_pb(pb: wire_pb2.ExpertHeatReport) -> HeatReportRecord:
+    return HeatReportRecord(
+        shard_id=pb.shard_id,
+        entries=tuple(
+            (int(e.layer_idx), int(e.expert_id), int(e.heat_ema_x100))
+            for e in pb.entries
+        ),
+        ts_unix_ms=int(pb.ts_unix_ms),
+    )
+
+
+def _ownership_to_pb(r: OwnershipDeltaRecord) -> wire_pb2.OwnershipDelta:
+    return wire_pb2.OwnershipDelta(
+        shard_id=r.shard_id,
+        layer_idx=r.layer_idx,
+        expert_id=r.expert_id,
+        action=r.action,
+        ts_unix_ms=r.ts_unix_ms,
+    )
+
+
+def _ownership_from_pb(pb: wire_pb2.OwnershipDelta) -> OwnershipDeltaRecord:
+    return OwnershipDeltaRecord(
+        shard_id=pb.shard_id,
+        layer_idx=int(pb.layer_idx),
+        expert_id=int(pb.expert_id),
+        action=int(pb.action),
+        ts_unix_ms=int(pb.ts_unix_ms),
+    )
+
+
 def encode_membership_envelope(msg: IncomingMessage) -> bytes:
     env = wire_pb2.Envelope()
     if isinstance(msg, PingMsg):
@@ -69,12 +115,16 @@ def encode_membership_envelope(msg: IncomingMessage) -> bytes:
         env.ping.from_incarnation = msg.from_incarnation
         env.ping.deltas.extend(_record_to_pb(d) for d in msg.deltas)
         env.ping.loads.extend(_load_to_pb(lr) for lr in msg.loads)
+        env.ping.heat.extend(_heat_to_pb(h) for h in msg.heat)
+        env.ping.ownership.extend(_ownership_to_pb(o) for o in msg.ownership)
     elif isinstance(msg, AckMsg):
         env.ack.protocol_version = _PROTOCOL_VERSION
         env.ack.from_shard_id = msg.from_shard_id
         env.ack.from_incarnation = msg.from_incarnation
         env.ack.deltas.extend(_record_to_pb(d) for d in msg.deltas)
         env.ack.loads.extend(_load_to_pb(lr) for lr in msg.loads)
+        env.ack.heat.extend(_heat_to_pb(h) for h in msg.heat)
+        env.ack.ownership.extend(_ownership_to_pb(o) for o in msg.ownership)
     elif isinstance(msg, PingReqMsg):
         env.ping_req.protocol_version = _PROTOCOL_VERSION
         env.ping_req.from_shard_id = msg.from_shard_id
@@ -82,6 +132,8 @@ def encode_membership_envelope(msg: IncomingMessage) -> bytes:
         env.ping_req.probe_id = msg.probe_id
         env.ping_req.deltas.extend(_record_to_pb(d) for d in msg.deltas)
         env.ping_req.loads.extend(_load_to_pb(lr) for lr in msg.loads)
+        env.ping_req.heat.extend(_heat_to_pb(h) for h in msg.heat)
+        env.ping_req.ownership.extend(_ownership_to_pb(o) for o in msg.ownership)
     elif isinstance(msg, PingReqAckMsg):
         env.ping_req_ack.protocol_version = _PROTOCOL_VERSION
         env.ping_req_ack.from_shard_id = msg.from_shard_id
@@ -90,6 +142,8 @@ def encode_membership_envelope(msg: IncomingMessage) -> bytes:
         env.ping_req_ack.success = msg.success
         env.ping_req_ack.deltas.extend(_record_to_pb(d) for d in msg.deltas)
         env.ping_req_ack.loads.extend(_load_to_pb(lr) for lr in msg.loads)
+        env.ping_req_ack.heat.extend(_heat_to_pb(h) for h in msg.heat)
+        env.ping_req_ack.ownership.extend(_ownership_to_pb(o) for o in msg.ownership)
     elif isinstance(msg, JoinMsg):
         env.join.protocol_version = _PROTOCOL_VERSION
         env.join.self_record.CopyFrom(_record_to_pb(msg.self_record))
@@ -111,6 +165,8 @@ def decode_membership_envelope(raw: bytes) -> IncomingMessage | None:
             from_incarnation=int(env.ping.from_incarnation),
             deltas=[_record_from_pb(d) for d in env.ping.deltas],
             loads=[_load_from_pb(lr) for lr in env.ping.loads],
+            heat=[_heat_from_pb(h) for h in env.ping.heat],
+            ownership=[_ownership_from_pb(o) for o in env.ping.ownership],
         )
     if which == "ack":
         return AckMsg(
@@ -118,6 +174,8 @@ def decode_membership_envelope(raw: bytes) -> IncomingMessage | None:
             from_incarnation=int(env.ack.from_incarnation),
             deltas=[_record_from_pb(d) for d in env.ack.deltas],
             loads=[_load_from_pb(lr) for lr in env.ack.loads],
+            heat=[_heat_from_pb(h) for h in env.ack.heat],
+            ownership=[_ownership_from_pb(o) for o in env.ack.ownership],
         )
     if which == "ping_req":
         return PingReqMsg(
@@ -126,6 +184,8 @@ def decode_membership_envelope(raw: bytes) -> IncomingMessage | None:
             probe_id=env.ping_req.probe_id,
             deltas=[_record_from_pb(d) for d in env.ping_req.deltas],
             loads=[_load_from_pb(lr) for lr in env.ping_req.loads],
+            heat=[_heat_from_pb(h) for h in env.ping_req.heat],
+            ownership=[_ownership_from_pb(o) for o in env.ping_req.ownership],
         )
     if which == "ping_req_ack":
         return PingReqAckMsg(
@@ -135,6 +195,8 @@ def decode_membership_envelope(raw: bytes) -> IncomingMessage | None:
             success=bool(env.ping_req_ack.success),
             deltas=[_record_from_pb(d) for d in env.ping_req_ack.deltas],
             loads=[_load_from_pb(lr) for lr in env.ping_req_ack.loads],
+            heat=[_heat_from_pb(h) for h in env.ping_req_ack.heat],
+            ownership=[_ownership_from_pb(o) for o in env.ping_req_ack.ownership],
         )
     if which == "join":
         return JoinMsg(self_record=_record_from_pb(env.join.self_record))
