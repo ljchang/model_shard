@@ -171,11 +171,25 @@ Tensor payload uses the existing out-of-band length-prefixed frame. `ExpertRespo
 
 Like Phase 2, Phase 3 is opt-in. A new env var `ENABLE_EXPERT_SHARD=false` (default) reverts to atomic layer-15 compute. `ENABLE_EXPERT_SHARD=true` plus non-empty `moe_experts` entries in `shards.yaml` activates the split path.
 
-## 8. Open Technical Question (to resolve during Task 1)
+## 8. MoE Forward — Resolved (2026-04-16)
 
-The mlx-vlm MoE forward may compute all 128 experts' gate/up/down on the activation tensor and mask by top-k, rather than the sparse "run only 8" pattern assumed above. If so, **Case X (masked-all):** `run_selected_experts` must run all experts on this node's share and let aggregation cancel the unused ones; bit-equivalence is preserved and the only cost is compute. **Case Y (sparse):** mlx-vlm truly runs only the selected experts; our prototype mirrors that directly and the split-equivalence test needs care around which 8-of-128 are present.
+mlx-vlm's `Experts` class (in `.venv/lib/python3.13/site-packages/mlx_vlm/models/gemma4/language.py`, lines 103-130) implements the MoE forward as **sparse**. It delegates to `mlx_lm.models.switch_layers.SwitchGLU` (lines 160-199 of `switch_layers.py`), which calls `mx.gather_mm` / `mx.gather_qmm` with `rhs_indices=top_k_indices` against a stacked weight tensor of shape `(num_experts, output_dims, input_dims)`. Only the 8 selected experts' rows are gathered and multiplied per token — all 128 experts' weights are resident, but only the top-k slice is computed. When `indices.size >= 64`, the path additionally sorts tokens by expert id (`_gather_sort`) for coalesced access and unsorts after `down_proj` (`_scatter_unsort`).
 
-Task 1 of the implementation plan will read mlx-vlm's MoE source and resolve this. The design supports either case because the wire protocol carries explicit `expert_ids` in both directions and `aggregate_experts` is already id-indexed.
+The atomic MoE op sequence inside one layer (Gemma4 `DecoderLayer.__call__`, language.py lines 300-352) is actually a two-branch block — **not** a classic "shared expert + gated sum" with a single pre-norm. Ordered:
+
+1. `h1 = post_feedforward_layernorm_1( mlp( pre_feedforward_layernorm(h) ) )` — dense MLP branch. In the 26B config `intermediate_size=2112` and `moe_intermediate_size=704`, i.e. `self.mlp` is exactly 3× the routed-expert intermediate. This is the "shared expert (3× size)" referenced in §1.1.
+2. `top_k_indices, top_k_weights = router(h)` where the router already L1-renormalizes `top_k_weights` and multiplies by `per_expert_scale[top_k_indices]`.
+3. `h2 = post_feedforward_layernorm_2( experts( pre_feedforward_layernorm_2(h), top_k_indices, top_k_weights ) )`. Inside `Experts.__call__` the per-token gated sum is `(expert_out * top_k_weights[..., None]).sum(axis=-2)` — i.e. the weighted sum across the top-k axis happens **inside** the experts module.
+4. `h = h1 + h2`; then `h = residual + post_feedforward_layernorm(h)`; then optional per-layer-input gating and `* layer_scalar`.
+
+So the two branches are summed **as equal peers** after each has gone through its own post-norm. There is no "shared × scale + gated sum" compositing; it's `norm1(mlp(norm0(h))) + norm2(experts(norm3(h), …))`.
+
+Phase 3 implications:
+- `run_selected_experts` will **run only the selected-and-locally-hosted experts** (the intersection of `top_k_indices` with this node's owned expert set), using a `gather_mm`-style per-token call. Each node passes that intersection as the `indices` argument to a `SwitchGLU`-equivalent over its local expert weight slab. No node ever computes all 128.
+- `aggregate_experts` op order: the gated sum across top-k is bit-equivalent to mlx-vlm's only if we reproduce `(expert_out_sorted_by_top_k_position * top_k_weights[..., None]).sum(axis=-2)` **before** applying `post_feedforward_layernorm_2`, then add the separately-computed `post_feedforward_layernorm_1(mlp(...))` dense-branch output. Translation: `aggregate_experts` must return `h1 + post_feedforward_layernorm_2( gated_sum_over_top_k(expert_outputs) )`, where the gated sum iterates over the top-k slot order (not ascending expert-id order). D5's "sort by expert-id before the gated sum" in §1.2 is **wrong** and must be revisited in Task 2 — addition is commutative but `post_feedforward_layernorm_2` is not, and more importantly the weights are paired to top-k positions, so we must preserve the top-k slot→expert-id mapping rather than resort by id. The `aggregate_experts` signature in §3.1 already takes `top_k_ids` and `top_k_weights` separately, which is sufficient; only the comment/docstring about "sort by expert-id" is stale.
+- Output dtype: **bf16 throughout**. The model is loaded in bfloat16 (`"dtype": "bfloat16"` in both the top-level and `text_config` of `config.json`); `mx.gather_mm` / `mx.gather_qmm` emit in the activation dtype; no fp32 accumulation is used by mlx-vlm. Wire frames for `ExpertRequest`/`ExpertResponse` tensors should carry bf16 payloads.
+
+Caveat: the "shared expert" terminology in §1.1 and §1.2-D3 refers to `self.mlp` (the dense MLP branch), not a 129th expert module. D3 ("shared expert replicated on all 3 nodes") still holds because `self.mlp`'s weights are part of every node's full-model load; no change to placement strategy. Task 2 should update `run_shared_expert` to literally invoke `layer.mlp` wrapped in the two norms, and revise D5's stale "sort by expert-id" note.
 
 ## 9. Acceptance Criteria (for Phase 3 complete)
 
@@ -192,4 +206,4 @@ Task 1 of the implementation plan will read mlx-vlm's MoE source and resolve thi
 - Phase 2 spec: `docs/superpowers/specs/2026-04-16-phase2-gossip-discovery-design.md`
 - Gemma 4 26B A4B architecture facts: `memory/gemma4_26b_architecture.md`
 - Gossip MoE full spec: `/Users/lukechang/Downloads/gossip-moe-inference-spec.md` §3.3, §6.4
-- mlx-vlm MoE source: to be read in Task 1 (resolves §8)
+- mlx-vlm MoE source: `.venv/lib/python3.13/site-packages/mlx_vlm/models/gemma4/language.py` (`Experts`, `Router`, `DecoderLayer`) and `.venv/lib/python3.13/site-packages/mlx_lm/models/switch_layers.py` (`SwitchGLU`, `SwitchLinear.__call__` using `mx.gather_mm` / `mx.gather_qmm`) — read in Task 1, §8 resolved.
