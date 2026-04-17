@@ -36,7 +36,10 @@ import socket
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, BinaryIO, cast
+from typing import TYPE_CHECKING, Any, BinaryIO, cast
+
+if TYPE_CHECKING:
+    from model_shard.request import ProvenanceEntry
 
 import mlx.core as mx
 
@@ -150,6 +153,8 @@ class Node:
             # which matches prior behavior.
             self._lm = cast(LoadedModel, loaded_model)
         self._total_layers = total_layers
+        # Phase 6-B: provenance chain per forward pass.
+        self._provenance_enabled = _provenance_enabled()
         self._downstream: ShardSpec = _resolve_downstream(shard, shard_map, total_layers)
 
         self._state_lock = threading.Lock()
@@ -381,6 +386,20 @@ class Node:
         prompt_tokens = list(req.prompt_token_ids)
         token_ids = mx.array([prompt_tokens])
         h = embed_tokens(self._lm, token_ids)
+
+        provenance_chain: list[ProvenanceEntry] = []
+        if self._provenance_enabled:
+            from model_shard.provenance import build_entry
+            from model_shard.request import OpDescriptor, OpType
+            provenance_chain.append(
+                build_entry(
+                    node_id=self._shard.shard_id,
+                    op=OpDescriptor(op_type=OpType.OP_EMBED),
+                    output_tensor=h,
+                    parent_hashes=(),
+                )
+            )
+
         try:
             h = self._run_my_layers(h, cache, request_id=req.request_id)
         except ExpertRpcFailure as exc:
@@ -396,7 +415,7 @@ class Node:
                 self._kv_caches.pop(req.request_id, None)
                 self._head_states.pop(req.request_id, None)
             return
-        self._forward_activation(req.request_id, h)
+        self._forward_activation(req.request_id, h, provenance_chain=provenance_chain or None)
 
         # Decode loop. Blocks on the queue until the tail returns tokens.
         self._drive_decode_loop(req.request_id, state)
@@ -485,6 +504,36 @@ class Node:
             )
             return
 
+        if self._provenance_enabled and len(act.provenance) > 0:
+            from model_shard.provenance import (
+                ProvenanceError,
+                entry_from_pb,
+                validate_chain,
+            )
+            inbound_chain = [entry_from_pb(p) for p in act.provenance]
+            try:
+                validate_chain(
+                    inbound_chain,
+                    shard_lookup=self._shard_lookup,
+                    total_layers=self._total_layers,
+                    split_layers_for_shard=self._split_layers_for_shard,
+                    live_owners_of=self.owners_of,
+                    tail_tensor_bytes=tensor_bytes,
+                )
+            except ProvenanceError as exc:
+                _LOG.warning(
+                    "inbound activation rejected by provenance on %s: %s",
+                    self._shard.shard_id, exc,
+                )
+                with contextlib.suppress(OSError):
+                    _send_error(
+                        inbound_stream,
+                        act.request_id,
+                        wire_pb2.ERR_INVALID_PROVENANCE,
+                        str(exc),
+                    )
+                return
+
         with self._state_lock:
             cache = self._kv_caches.setdefault(act.request_id, make_cache(self._lm))
 
@@ -520,6 +569,20 @@ class Node:
 
         if self.is_tail:
             logits = finalize(self._lm, h)
+            if self._provenance_enabled:
+                from model_shard.provenance import build_entry, entry_from_pb
+                from model_shard.request import OpDescriptor, OpType
+                inbound_chain = [entry_from_pb(p) for p in act.provenance] if len(act.provenance) > 0 else []
+                _parent_hashes = (inbound_chain[-1].hash,) if inbound_chain else ()
+                _finalize_entry = build_entry(
+                    node_id=self._shard.shard_id,
+                    op=OpDescriptor(op_type=OpType.OP_FINALIZE),
+                    output_tensor=logits,
+                    parent_hashes=_parent_hashes,
+                )
+                # Chain with finalize entry built locally; not yet forwarded to
+                # client (SampledToken wire field is out of scope until Task 8).
+                _ = [*inbound_chain, _finalize_entry]
             token_id = int(mx.argmax(logits[0, -1, :]).item())
             # Position is managed by the head; we leave it 0 here.
             self._send_sampled_token(act.request_id, token_id, position=0)
@@ -724,14 +787,23 @@ class Node:
             request_id=request_id,
         )
 
-    def _forward_activation(self, request_id: str, h: mx.array) -> None:
-        """Send an Activation to the downstream peer (mid→next, or tail should not reach here)."""
+    def _forward_activation(
+        self,
+        request_id: str,
+        h: mx.array,
+        provenance_chain: list[ProvenanceEntry] | None = None,
+    ) -> None:
+        """Send an Activation to the downstream peer."""
         assert not self.is_tail, "tail should call _send_sampled_token instead"
-        # Capture for in-process Tier 2 testing.
         self._debug_captures.setdefault(request_id, []).append(
             (self._shard.end_layer, h)
         )
         env, raw = _activation_envelope(request_id, self._shard.end_layer, h)
+        if self._provenance_enabled and provenance_chain:
+            from model_shard.provenance import entry_to_pb
+            env.activation.provenance.extend(
+                entry_to_pb(e) for e in provenance_chain
+            )
         self._write_out(env, raw)
 
     def _send_sampled_token(
@@ -820,6 +892,23 @@ class Node:
             queue_depth_ema=self._load_tracker.report(),
             ts_unix_ms=int(time.time() * 1000),
         )
+
+    def _shard_lookup(self, shard_id: str) -> tuple[int, int]:
+        """Return (start_layer, end_layer) for a shard, or (0, 0) if unknown
+        (which fails authorization naturally in validate_chain)."""
+        try:
+            spec = self._shard_map.lookup(shard_id)
+        except KeyError:
+            return (0, 0)
+        return (spec.start_layer, spec.end_layer)
+
+    def _split_layers_for_shard(self, shard_id: str) -> set[int]:
+        """Return the set of layer indices that are split on ``shard_id``."""
+        try:
+            spec = self._shard_map.lookup(shard_id)
+        except KeyError:
+            return set()
+        return set(spec.moe_experts.keys())
 
     def owners_of(self, layer_idx: int, expert_id: int) -> set[str]:
         """Return the current live owner set for (layer_idx, expert_id).
@@ -1114,6 +1203,13 @@ def _migration_heat_threshold() -> int:
 
 def _migration_max_experts_per_layer() -> int:
     return int(os.environ.get("MIGRATION_MAX_EXPERTS_PER_LAYER", "128"))
+
+
+def _provenance_enabled() -> bool:
+    """Phase 6-B provenance chain gate. Default OFF so all prior tests are
+    unaffected. When ON, Node embeds provenance entries into Activation
+    messages and validates inbound chains."""
+    return os.environ.get("ENABLE_PROVENANCE", "false").lower() in ("1", "true", "yes")
 
 
 __all__ = ["Node", "PeerLeftAliveError"]
