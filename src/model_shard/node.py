@@ -58,6 +58,7 @@ from model_shard.migration import (
 )
 from model_shard.mlx_engine import (
     LoadedModel,
+    _mx_to_wire_dtype,
     bytes_to_tensor,
     embed_tokens,
     finalize,
@@ -656,7 +657,7 @@ class Node:
             resp.expert_response.layer_idx = layer_idx
             resp.expert_response.expert_ids.extend(requested)
             resp.expert_response.outputs_spec.shape.extend(list(stacked.shape))
-            resp.expert_response.outputs_spec.dtype = _dtype_to_wire(stacked.dtype)
+            resp.expert_response.outputs_spec.dtype = _mx_to_wire_dtype(stacked.dtype)
             resp.expert_response.outputs_spec.quant = wire_pb2.QUANT_NONE
             resp.expert_response.outputs_spec.byte_count = len(raw)
             send_envelope(inbound_stream, resp, raw)
@@ -697,7 +698,7 @@ class Node:
         for t in tensors:
             d = resp.expert_weight_transfer.tensors.add()
             d.shape.extend(list(t.shape))
-            d.dtype = _dtype_to_wire(t.dtype)
+            d.dtype = _mx_to_wire_dtype(t.dtype)
             d.quant = wire_pb2.QUANT_NONE
             raw = tensor_to_bytes(t)
             d.byte_count = len(raw)
@@ -1017,18 +1018,6 @@ def _resolve_downstream(
     )
 
 
-def _dtype_to_wire(dt: mx.Dtype) -> int:
-    if dt == mx.bfloat16:
-        return int(wire_pb2.DTYPE_BFLOAT16)
-    if dt == mx.float32:
-        return int(wire_pb2.DTYPE_FLOAT32)
-    if dt == mx.float16:
-        return int(wire_pb2.DTYPE_FLOAT16)
-    if dt == mx.uint32:
-        return int(wire_pb2.DTYPE_UINT32)
-    raise ValueError(f"unsupported activation dtype: {dt}")
-
-
 def _activation_envelope(
     request_id: str, next_layer: int, h: mx.array
 ) -> tuple[wire_pb2.Envelope, bytes]:
@@ -1038,7 +1027,7 @@ def _activation_envelope(
     env.activation.request_id = request_id
     env.activation.next_layer_idx = next_layer
     env.activation.tensor.shape.extend(list(h.shape))
-    env.activation.tensor.dtype = _dtype_to_wire(h.dtype)
+    env.activation.tensor.dtype = _mx_to_wire_dtype(h.dtype)
     env.activation.tensor.quant = wire_pb2.QUANT_NONE
     env.activation.tensor.byte_count = len(raw)
     return env, raw

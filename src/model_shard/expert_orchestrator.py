@@ -28,7 +28,7 @@ import mlx.core as mx
 
 from model_shard._pb import wire_pb2
 from model_shard.envelope import recv_envelope, send_envelope
-from model_shard.mlx_engine import bytes_to_tensor, tensor_to_bytes
+from model_shard.mlx_engine import _mx_to_wire_dtype, bytes_to_tensor, tensor_to_bytes
 from model_shard.moe import (
     aggregate_experts,
     group_expert_ids_by_owner_loaded,
@@ -57,18 +57,6 @@ class PeerRPC(Protocol):
         ExpertResponse, and return ``{expert_id: output tensor}``. Must
         raise on timeout or RPC error."""
         ...
-
-
-def _dtype_to_wire(dt: mx.Dtype) -> int:
-    if dt == mx.bfloat16:
-        return int(wire_pb2.DTYPE_BFLOAT16)
-    if dt == mx.float32:
-        return int(wire_pb2.DTYPE_FLOAT32)
-    if dt == mx.float16:
-        return int(wire_pb2.DTYPE_FLOAT16)
-    if dt == mx.uint32:
-        return int(wire_pb2.DTYPE_UINT32)
-    raise ValueError(f"unsupported activation dtype: {dt}")
 
 
 class TcpPeerRPC:
@@ -111,7 +99,7 @@ class TcpPeerRPC:
             # receiver can rehydrate without guessing.
             raw = tensor_to_bytes(h)
             req.expert_request.h_spec.shape.extend(list(h.shape))
-            req.expert_request.h_spec.dtype = _dtype_to_wire(h.dtype)
+            req.expert_request.h_spec.dtype = _mx_to_wire_dtype(h.dtype)
             req.expert_request.h_spec.quant = wire_pb2.QUANT_NONE
             req.expert_request.h_spec.byte_count = len(raw)
             send_envelope(cast(BinaryIO, stream), req, raw)

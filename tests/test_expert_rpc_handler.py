@@ -25,19 +25,9 @@ import pytest
 
 from model_shard._pb import wire_pb2
 from model_shard.envelope import recv_envelope, send_envelope
-from model_shard.mlx_engine import bytes_to_tensor, tensor_to_bytes
+from model_shard.mlx_engine import _mx_to_wire_dtype, bytes_to_tensor, tensor_to_bytes
 from model_shard.node import Node
 from model_shard.shard_map import NodeAddress, ShardMap, ShardSpec
-
-
-def _dtype_to_wire(dt: mx.Dtype) -> int:
-    if dt == mx.bfloat16:
-        return int(wire_pb2.DTYPE_BFLOAT16)
-    if dt == mx.float32:
-        return int(wire_pb2.DTYPE_FLOAT32)
-    if dt == mx.float16:
-        return int(wire_pb2.DTYPE_FLOAT16)
-    raise ValueError(f"unsupported dtype: {dt}")
 
 
 def _free_port() -> int:
@@ -76,7 +66,7 @@ def _build_expert_request(
     env.expert_request.expert_ids.extend(expert_ids)
     raw = tensor_to_bytes(h)
     env.expert_request.h_spec.shape.extend(list(h.shape))
-    env.expert_request.h_spec.dtype = _dtype_to_wire(h.dtype)
+    env.expert_request.h_spec.dtype = _mx_to_wire_dtype(h.dtype)
     env.expert_request.h_spec.quant = wire_pb2.QUANT_NONE
     env.expert_request.h_spec.byte_count = len(raw)
     return env, raw

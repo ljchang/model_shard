@@ -10,7 +10,7 @@ import pytest
 from model_shard._pb import wire_pb2
 from model_shard.envelope import recv_envelope, send_envelope
 from model_shard.migration import ExpertWeightPeerRPC
-from model_shard.mlx_engine import tensor_to_bytes
+from model_shard.mlx_engine import _mx_to_wire_dtype, tensor_to_bytes
 
 
 def _fake_server(host: str, port: int, tensors: list[mx.array]) -> threading.Thread:
@@ -31,11 +31,10 @@ def _fake_server(host: str, port: int, tensors: list[mx.array]) -> threading.Thr
         resp.expert_weight_transfer.expert_id = req.expert_id
         resp.expert_weight_transfer.tensor_count = len(tensors)
         blobs: list[bytes] = []
-        from model_shard.expert_orchestrator import _dtype_to_wire
         for t in tensors:
             d = resp.expert_weight_transfer.tensors.add()
             d.shape.extend(list(t.shape))
-            d.dtype = _dtype_to_wire(t.dtype)
+            d.dtype = _mx_to_wire_dtype(t.dtype)
             d.quant = wire_pb2.QUANT_NONE
             raw = tensor_to_bytes(t)
             d.byte_count = len(raw)

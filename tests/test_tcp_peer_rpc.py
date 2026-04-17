@@ -19,17 +19,7 @@ import mlx.core as mx
 from model_shard._pb import wire_pb2
 from model_shard.envelope import recv_envelope, send_envelope
 from model_shard.expert_orchestrator import TcpPeerRPC
-from model_shard.mlx_engine import bytes_to_tensor, tensor_to_bytes
-
-
-def _dtype_to_wire(dt: mx.Dtype) -> int:
-    if dt == mx.bfloat16:
-        return int(wire_pb2.DTYPE_BFLOAT16)
-    if dt == mx.float32:
-        return int(wire_pb2.DTYPE_FLOAT32)
-    if dt == mx.float16:
-        return int(wire_pb2.DTYPE_FLOAT16)
-    raise ValueError(f"unsupported dtype: {dt}")
+from model_shard.mlx_engine import _mx_to_wire_dtype, bytes_to_tensor, tensor_to_bytes
 
 
 def _start_fake_peer(expert_ids: list[int]) -> int:
@@ -67,7 +57,7 @@ def _start_fake_peer(expert_ids: list[int]) -> int:
                 resp.expert_response.expert_ids.extend(expert_ids)
                 raw = tensor_to_bytes(stacked)
                 resp.expert_response.outputs_spec.shape.extend(list(stacked.shape))
-                resp.expert_response.outputs_spec.dtype = _dtype_to_wire(stacked.dtype)
+                resp.expert_response.outputs_spec.dtype = _mx_to_wire_dtype(stacked.dtype)
                 resp.expert_response.outputs_spec.quant = wire_pb2.QUANT_NONE
                 resp.expert_response.outputs_spec.byte_count = len(raw)
                 send_envelope(cast(BinaryIO, stream), resp, raw)
