@@ -9,8 +9,12 @@ Layering:
 from __future__ import annotations
 
 import logging
+import random as _random
 import socket
-from typing import BinaryIO, cast
+import threading as _threading
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any, BinaryIO, cast
 
 import mlx.core as mx
 
@@ -98,4 +102,107 @@ class ExpertWeightPeerRPC:
             s.close()
 
 
-__all__ = ["ExpertWeightPeerRPC"]
+@dataclass(frozen=True)
+class MigrationPolicy:
+    scan_interval_s: float
+    heat_threshold: int
+    max_experts_per_layer: int
+
+
+class MigrationScanner:
+    """Periodic target-pull scanner (Phase 5b decider, simple threshold).
+
+    Responsibilities:
+      * Rank locally-routed experts by heat (EMA x 100).
+      * Skip experts this node already hosts or layers at capacity.
+      * Below threshold -> no migration this tick.
+      * Single in-flight cap prevents stampedes on a single node.
+      * Picks the least-loaded peer owner via `load_provider` as source.
+
+    Task 16 adds the background-thread lifecycle on top of this.
+    """
+
+    def __init__(
+        self,
+        self_shard_id: str,
+        policy: MigrationPolicy,
+        heat_tracker: Any,
+        live_experts: dict[int, set[int]],
+        owner_lookup: Callable[[int, int], set[str]],
+        load_provider: Callable[[], dict[str, int]],
+        peer_rpc: Any,
+        attacher: Callable[[int, int, list[mx.array]], None],
+        ownership_announcer: Callable[[int, int], None],
+        rng: _random.Random | None = None,
+    ) -> None:
+        self._self_shard_id = self_shard_id
+        self._policy = policy
+        self._heat_tracker = heat_tracker
+        self._live_experts = live_experts
+        self._owner_lookup = owner_lookup
+        self._load_provider = load_provider
+        self._peer_rpc = peer_rpc
+        self._attacher = attacher
+        self._ownership_announcer = ownership_announcer
+        self._rng = rng or _random.Random()
+        self._stopping = _threading.Event()
+        self._thread: _threading.Thread | None = None
+        self._in_flight = _threading.Lock()
+
+    def _select_candidate(self) -> tuple[int, int, str] | None:
+        """Return (layer_idx, expert_id, source_shard_id) or None."""
+        report = sorted(
+            self._heat_tracker.report(), key=lambda t: t[2], reverse=True
+        )
+        for layer_idx, expert_id, _ema in report:
+            held = self._live_experts.get(layer_idx, set())
+            if expert_id in held:
+                continue
+            if len(held) >= self._policy.max_experts_per_layer:
+                continue
+            if self._heat_tracker.local_heat(
+                layer_idx, expert_id
+            ) < self._policy.heat_threshold:
+                continue
+            owners = self._owner_lookup(layer_idx, expert_id) - {self._self_shard_id}
+            if not owners:
+                continue
+            loads = self._load_provider()
+            source = min(owners, key=lambda s: loads.get(s, 2**31 - 1))
+            return layer_idx, expert_id, source
+        return None
+
+    def _scan_once(self) -> None:
+        if not self._in_flight.acquire(blocking=False):
+            return
+        try:
+            pick = self._select_candidate()
+            if pick is None:
+                return
+            layer_idx, expert_id, source = pick
+            try:
+                tensors = self._peer_rpc.pull(
+                    source_shard_id=source,
+                    layer_idx=layer_idx,
+                    expert_id=expert_id,
+                )
+            except Exception:
+                _LOG.exception(
+                    "migration pull failed: %s layer=%d expert=%d",
+                    source, layer_idx, expert_id,
+                )
+                return
+            try:
+                self._attacher(layer_idx, expert_id, tensors)
+            except Exception:
+                _LOG.exception(
+                    "attach failed after pull: layer=%d expert=%d",
+                    layer_idx, expert_id,
+                )
+                return
+            self._ownership_announcer(layer_idx, expert_id)
+        finally:
+            self._in_flight.release()
+
+
+__all__ = ["ExpertWeightPeerRPC", "MigrationPolicy", "MigrationScanner"]
