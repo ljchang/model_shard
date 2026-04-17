@@ -31,8 +31,10 @@ import contextlib
 import logging
 import os
 import queue
+import random as _random_mod
 import socket
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, BinaryIO, cast
 
@@ -45,8 +47,9 @@ from model_shard.expert_orchestrator import (
     ExpertRpcFailure,
     TcpPeerRPC,
 )
+from model_shard.load import LoadTracker
 from model_shard.membership import MembershipRunner, PeerSpec, SwimConfig
-from model_shard.membership.records import StateTransition
+from model_shard.membership.records import LoadReportRecord, StateTransition
 from model_shard.mlx_engine import (
     LoadedModel,
     bytes_to_tensor,
@@ -111,6 +114,24 @@ class Node:
         self._membership: MembershipRunner | None = None
         if _gossip_enabled():
             self._membership = self._build_membership_runner()
+
+        # Phase 4 load tracking. The tracker is always constructed (even when
+        # gossip is disabled) so ``_handle_expert_request`` has somewhere to
+        # post queue-depth samples. The runner-side ``start_load_source``
+        # registration is only useful when gossip is active.
+        self._load_tracker = LoadTracker(
+            alpha=0.3, jitter_pct=0.1, rng=_random_mod.Random()
+        )
+        self._in_flight_expert_requests: int = 0
+
+        if self._membership is not None:
+            def _load_source() -> LoadReportRecord:
+                return LoadReportRecord(
+                    shard_id=self._shard.shard_id,
+                    queue_depth_ema=self._load_tracker.report(),
+                    ts_unix_ms=int(time.time() * 1000),
+                )
+            self._membership.start_load_source(_load_source)
 
         # Phase 3 expert sharding. Construct an ``ExpertOrchestrator`` only on
         # nodes whose layer range (i.e., whose attention) covers a split layer
@@ -471,36 +492,51 @@ class Node:
         # Acquire the process-wide MLX lock around evaluation so concurrent
         # ExpertRequest handlers (possible when 3 in-process nodes share the
         # default MLX stream in the test fixture) don't race on Metal.
+        #
+        # Phase 4: bracket the entire handler body with an in-flight counter
+        # so ``LoadTracker`` sees the arrival and departure of every expert
+        # request on this shard. The outer try/finally guarantees the
+        # decrement runs even on the error-path early return below.
+        self._in_flight_expert_requests += 1
+        self._load_tracker.observe(self._in_flight_expert_requests)
         try:
-            with _MLX_COMPUTE_LOCK:
-                outputs = run_selected_experts(self._lm, h, layer_idx, requested)
-                # Stack in request order so the caller can unstack by index.
-                stacked = mx.stack([outputs[eid] for eid in requested], axis=2)
-                # Force realization before releasing the lock so the serialized
-                # bytes are based on fully-computed data (and no dangling graph
-                # refs cross threads).
-                mx.eval(stacked)
-                raw = tensor_to_bytes(stacked)
-        except Exception as exc:
-            _LOG.exception("expert fan-out raised")
-            _send_error(
-                inbound_stream,
-                req.request_id,
-                wire_pb2.ERR_SHARD_UNAVAILABLE,
-                f"expert execution failed: {exc}",
-            )
-            return
+            try:
+                with _MLX_COMPUTE_LOCK:
+                    outputs = run_selected_experts(
+                        self._lm, h, layer_idx, requested
+                    )
+                    # Stack in request order so the caller can unstack by index.
+                    stacked = mx.stack(
+                        [outputs[eid] for eid in requested], axis=2
+                    )
+                    # Force realization before releasing the lock so the
+                    # serialized bytes are based on fully-computed data (and no
+                    # dangling graph refs cross threads).
+                    mx.eval(stacked)
+                    raw = tensor_to_bytes(stacked)
+            except Exception as exc:
+                _LOG.exception("expert fan-out raised")
+                _send_error(
+                    inbound_stream,
+                    req.request_id,
+                    wire_pb2.ERR_SHARD_UNAVAILABLE,
+                    f"expert execution failed: {exc}",
+                )
+                return
 
-        resp = wire_pb2.Envelope()
-        resp.expert_response.protocol_version = _PROTOCOL_VERSION
-        resp.expert_response.request_id = req.request_id
-        resp.expert_response.layer_idx = layer_idx
-        resp.expert_response.expert_ids.extend(requested)
-        resp.expert_response.outputs_spec.shape.extend(list(stacked.shape))
-        resp.expert_response.outputs_spec.dtype = _dtype_to_wire(stacked.dtype)
-        resp.expert_response.outputs_spec.quant = wire_pb2.QUANT_NONE
-        resp.expert_response.outputs_spec.byte_count = len(raw)
-        send_envelope(inbound_stream, resp, raw)
+            resp = wire_pb2.Envelope()
+            resp.expert_response.protocol_version = _PROTOCOL_VERSION
+            resp.expert_response.request_id = req.request_id
+            resp.expert_response.layer_idx = layer_idx
+            resp.expert_response.expert_ids.extend(requested)
+            resp.expert_response.outputs_spec.shape.extend(list(stacked.shape))
+            resp.expert_response.outputs_spec.dtype = _dtype_to_wire(stacked.dtype)
+            resp.expert_response.outputs_spec.quant = wire_pb2.QUANT_NONE
+            resp.expert_response.outputs_spec.byte_count = len(raw)
+            send_envelope(inbound_stream, resp, raw)
+        finally:
+            self._in_flight_expert_requests -= 1
+            self._load_tracker.observe(self._in_flight_expert_requests)
 
     # ------------------------------------------------------------ forwarding
 
@@ -634,12 +670,23 @@ class Node:
             for sid in self._shard_map.all_shards()
             if sid != self._shard.shard_id
         }
+
+        def _loads_provider() -> dict[str, int]:
+            if self._membership is None:
+                return {}
+            return {
+                sid: lr.queue_depth_ema
+                for sid, lr in self._membership.latest_loads().items()
+            }
+
         return ExpertOrchestrator(
             self_shard_id=self._shard.shard_id,
             owners=owners,
             peer_rpc=TcpPeerRPC(addresses=addresses, timeout_s=30.0),
             rpc_timeout_s=30.0,
             mlx_lock=_MLX_COMPUTE_LOCK,
+            loads_provider=_loads_provider,
+            rng=_random_mod.Random(),
         )
 
     def _build_membership_runner(self) -> MembershipRunner:
