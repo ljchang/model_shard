@@ -126,27 +126,45 @@ def run_selected_experts(
     skips the sort path), so numerical equivalence with the atomic path is
     not claimed here — that property is the subject of the Task 9 split-
     equivalence proof.
+
+    Phase 5a: if this shard holds only a subset of experts for this layer
+    (``lm.held_ids_per_layer[layer_idx]`` non-empty), each global expert id is
+    translated to its local slot in the compact stacked weight tensor. The
+    sliced ``Experts`` module's leading expert dim is the local slot count,
+    not 128 — global id 3, when held is ``[0, 3, 6, 9]``, lives at slot 1.
+    A global id not in the held list raises KeyError. When the layer holds
+    all experts (key absent / value empty), the slot equals the global id
+    and behavior is identical to pre-Phase-5a.
     """
     if not expert_ids:
         return {}
-
     layer = lm.text_model.layers[layer_idx]
-    # Same norm mlx-vlm's DecoderLayer applies before self.experts(...).
     h_normed = layer.pre_feedforward_layernorm_2(h)
+    b, ell, hidden = h_normed.shape
 
-    b, ell, _ = h_normed.shape
-    ones_weights = mx.ones((b, ell, 1), dtype=h_normed.dtype)
+    held = lm.held_ids_per_layer.get(layer_idx)
+    global_to_local = (
+        {int(gid): li for li, gid in enumerate(held)} if held else None
+    )
 
-    out: dict[int, mx.array] = {}
+    per_expert: dict[int, mx.array] = {}
+    one_weight = mx.ones((b * ell, 1), dtype=h_normed.dtype)
+    h_flat = h_normed.reshape(b * ell, hidden)
     for eid in expert_ids:
-        key = int(eid)
-        indices = mx.full((b, ell, 1), vals=key, dtype=mx.uint32)
-        # Experts.__call__ does: expert_out(B*L,1,H) * weights(B*L,1,1) then
-        # sum(axis=-2) -> (B*L,H) -> reshape to (B,L,H). With K=1 and w=1.0
-        # the multiply+sum is an identity, so we get the raw per-expert output.
-        raw = layer.experts(h_normed, indices, ones_weights)
-        out[key] = raw
-    return out
+        if global_to_local is not None:
+            try:
+                slot = global_to_local[int(eid)]
+            except KeyError as e:
+                raise KeyError(
+                    f"expert {eid} not held on this shard "
+                    f"(layer {layer_idx} held ids: {held})"
+                ) from e
+        else:
+            slot = int(eid)
+        idx = mx.full((b * ell, 1), slot, dtype=mx.int32)
+        out_flat = layer.experts(h_flat[:, None, :], idx, one_weight)
+        per_expert[int(eid)] = out_flat.reshape(b, ell, hidden)
+    return per_expert
 
 
 def run_shared_expert(lm: Any, h: mx.array, layer_idx: int) -> mx.array:
