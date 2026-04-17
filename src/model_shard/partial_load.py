@@ -144,13 +144,43 @@ def attach_expert(
     lm: LoadedModel,
     layer_idx: int,
     expert_id: int,
-    tensors: "list[mx.array]",
+    tensors: list[mx.array],
     mlx_lock: threading.Lock,
 ) -> None:
-    """Attach received expert tensors into the local model in-place.
+    """Grow the compact stack at ``layer_idx`` by one expert.
 
-    Stub — full implementation in Task 6."""
-    raise NotImplementedError("attach_expert is implemented in Task 6")
+    Invariants:
+      * ``expert_id`` must not already be in ``lm.held_ids_per_layer[layer_idx]``.
+      * ``tensors`` must be exactly 9 items in the canonical ``_PROJ_ATTR_ORDER``.
+
+    Under ``mlx_lock``:
+      1. For each (proj, attr), replace the attribute with
+         ``mx.concatenate([current, incoming[None, ...]], axis=0)``.
+      2. Append ``expert_id`` to ``held_ids_per_layer[layer_idx]``.
+      3. ``mx.eval`` the 9 new tensors to force realization.
+    """
+    if len(tensors) != 9:
+        raise ValueError(f"attach_expert requires 9 tensors, got {len(tensors)}")
+    held_before = lm.held_ids_per_layer.get(layer_idx, ())
+    if expert_id in held_before:
+        raise ValueError(
+            f"expert {expert_id} already held at layer {layer_idx} "
+            f"(held: {held_before})"
+        )
+    layer = lm.text_model.layers[layer_idx]
+    switch_glu = layer.experts.switch_glu
+    with mlx_lock:
+        realized: list[mx.array] = []
+        for (proj_name, attr), incoming in zip(_PROJ_ATTR_ORDER, tensors):
+            proj = getattr(switch_glu, proj_name)
+            current = getattr(proj, attr)
+            grown = mx.concatenate(
+                [current, incoming[None, ...]], axis=0
+            )
+            setattr(proj, attr, grown)
+            realized.append(grown)
+        lm.held_ids_per_layer[layer_idx] = (*held_before, expert_id)
+        mx.eval(*realized)
 
 
 __all__ = ["_slice_stacked_by_axis0", "attach_expert", "load_model_partial", "slice_expert"]
