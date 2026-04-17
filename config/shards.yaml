@@ -1,5 +1,7 @@
 # Phase 1 static shard map — 3-way partition of Gemma 4 26B A4B (30 layers)
 # across 3 localhost node processes. Phase 3 adds per-layer expert ownership.
+# Phase 4 overlaps experts 0, 1, 2 across two shards each to create
+# multi-candidate scenarios for load-aware routing.
 
 shards:
   layer_0-10:
@@ -8,18 +10,21 @@ shards:
     start_layer: 0
     end_layer: 10
     moe_experts:
-      15: [0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45, 48, 51, 54, 57, 60, 63, 66, 69, 72, 75, 78, 81, 84, 87, 90, 93, 96, 99, 102, 105, 108, 111, 114, 117, 120, 123, 126]
+      # Base: experts e where e % 3 == 0. Phase 4 adds expert 2 (overlap with tail).
+      15: [0, 2, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45, 48, 51, 54, 57, 60, 63, 66, 69, 72, 75, 78, 81, 84, 87, 90, 93, 96, 99, 102, 105, 108, 111, 114, 117, 120, 123, 126]
   layer_10-20:
     host: 127.0.0.1
     port: 9002
     start_layer: 10
     end_layer: 20
     moe_experts:
-      15: [1, 4, 7, 10, 13, 16, 19, 22, 25, 28, 31, 34, 37, 40, 43, 46, 49, 52, 55, 58, 61, 64, 67, 70, 73, 76, 79, 82, 85, 88, 91, 94, 97, 100, 103, 106, 109, 112, 115, 118, 121, 124, 127]
+      # Base: experts e where e % 3 == 1. Phase 4 adds expert 0 (overlap with head).
+      15: [0, 1, 4, 7, 10, 13, 16, 19, 22, 25, 28, 31, 34, 37, 40, 43, 46, 49, 52, 55, 58, 61, 64, 67, 70, 73, 76, 79, 82, 85, 88, 91, 94, 97, 100, 103, 106, 109, 112, 115, 118, 121, 124, 127]
   layer_20-30:
     host: 127.0.0.1
     port: 9003
     start_layer: 20
     end_layer: 30
     moe_experts:
-      15: [2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35, 38, 41, 44, 47, 50, 53, 56, 59, 62, 65, 68, 71, 74, 77, 80, 83, 86, 89, 92, 95, 98, 101, 104, 107, 110, 113, 116, 119, 122, 125]
+      # Base: experts e where e % 3 == 2. Phase 4 adds expert 1 (overlap with mid).
+      15: [1, 2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35, 38, 41, 44, 47, 50, 53, 56, 59, 62, 65, 68, 71, 74, 77, 80, 83, 86, 89, 92, 95, 98, 101, 104, 107, 110, 113, 116, 119, 122, 125]
