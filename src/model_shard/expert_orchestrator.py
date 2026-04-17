@@ -15,10 +15,11 @@ a single node owns every routed expert for a given layer.
 from __future__ import annotations
 
 import contextlib
+import random
 import socket
 import threading
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, BinaryIO, Protocol, cast
@@ -30,7 +31,7 @@ from model_shard.envelope import recv_envelope, send_envelope
 from model_shard.mlx_engine import bytes_to_tensor, tensor_to_bytes
 from model_shard.moe import (
     aggregate_experts,
-    group_expert_ids_by_owner,
+    group_expert_ids_by_owner_loaded,
     run_attention_and_route,
     run_selected_experts,
     run_shared_expert,
@@ -160,6 +161,16 @@ class ExpertOrchestrator:
     # runtime (the test fixture); harmless in production (each node is a
     # separate process, so the lock never contends with anything).
     mlx_lock: threading.Lock | None = None
+    # Phase 4: P2C routing inputs. ``loads_provider`` returns the most recent
+    # peer loads (shard_id -> EMA x 100) seen via gossip; default is a no-op
+    # returning ``{}``, which makes the orchestrator behave like Phase 3
+    # (every candidate ties at the sentinel, single-owner experts unchanged).
+    # ``rng`` is used by ``group_expert_ids_by_owner_loaded`` to sample two
+    # candidates when an expert has >=3 owners.
+    loads_provider: Callable[[], Mapping[str, int]] = field(
+        default_factory=lambda: (lambda: {})
+    )
+    rng: random.Random = field(default_factory=random.Random)
     _executor: ThreadPoolExecutor = field(init=False, repr=False)
     # Observer-abort bookkeeping. Each active `run_split_layer` registers a
     # per-peer threading.Event; ``notify_peer_left_alive`` sets every event
@@ -324,7 +335,16 @@ class ExpertOrchestrator:
             all_ids = sorted(
                 {int(e) for e in top_k_ids.reshape(-1).tolist()}  # type: ignore[arg-type,union-attr]
             )
-            by_owner = group_expert_ids_by_owner(all_ids, self.owners)
+            peer_loads = self.loads_provider()
+            self_load = peer_loads.get(self.self_shard_id, 0)
+            by_owner = group_expert_ids_by_owner_loaded(
+                all_ids,
+                owners=self.owners,
+                peer_loads=peer_loads,
+                self_shard_id=self.self_shard_id,
+                self_load=self_load,
+                rng=self.rng,
+            )
 
             local_ids = by_owner.pop(self.self_shard_id, [])
             shared_out = run_shared_expert(lm, post_attn, layer_idx)
