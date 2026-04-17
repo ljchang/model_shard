@@ -93,6 +93,20 @@ class Node:
     ) -> None:
         self._shard = shard
         self._shard_map = shard_map
+        # Phase 5b: runtime expert ownership registry (see spec D9).
+        # Seeded from the frozen ShardSpec at boot; mutated by migration attach.
+        self._live_experts: dict[int, set[int]] = {
+            layer: set(ids) for layer, ids in shard.moe_experts.items()
+        }
+        # Union of bootstrap moe_experts across ALL shards + received
+        # OwnershipDelta ADDs (see spec D10).
+        self._ownership_seen: set[tuple[str, int, int]] = set()
+        for sid in shard_map.all_shards():
+            peer_spec = shard_map.lookup(sid)
+            for layer, ids in peer_spec.moe_experts.items():
+                for eid in ids:
+                    self._ownership_seen.add((sid, layer, eid))
+        self._ownership_seen_lock = threading.Lock()
         # Phase 5a: when ENABLE_PARTIAL_LOAD is set AND the caller did not
         # pass a pre-loaded model AND this shard actually hosts routed
         # experts, build the model via ``load_model_partial`` so only the
@@ -716,6 +730,17 @@ class Node:
             queue_depth_ema=self._load_tracker.report(),
             ts_unix_ms=int(time.time() * 1000),
         )
+
+    def owners_of(self, layer_idx: int, expert_id: int) -> set[str]:
+        """Return the current live owner set for (layer_idx, expert_id).
+
+        Union of bootstrap ShardSpec.moe_experts and gossip-observed ADDs.
+        Used by ExpertOrchestrator.live_owners_provider in Phase 5b."""
+        with self._ownership_seen_lock:
+            return {
+                sid for (sid, lyr, eid) in self._ownership_seen
+                if lyr == layer_idx and eid == expert_id
+            }
 
     def _build_expert_orchestrator(self) -> ExpertOrchestrator:
         """Construct an ExpertOrchestrator that fans out to peers via TCP.
