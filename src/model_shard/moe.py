@@ -86,6 +86,63 @@ def run_attention_and_route(
     return post_attn, top_k_ids, top_k_weights
 
 
+def run_selected_experts(
+    lm: Any,
+    h: mx.array,
+    layer_idx: int,
+    expert_ids: list[int],
+) -> dict[int, mx.array]:
+    """Return raw per-expert outputs for the experts named in ``expert_ids``.
+
+    This is the sparse fan-out primitive: each node calls this for the experts
+    it owns, and the caller (aggregation layer) multiplies each result by the
+    corresponding router top-k weight and sums. Here we do NOT apply those
+    weights — callers need the raw outputs so the same expert tensor can be
+    used across different tokens / positions that pick it with different
+    weights.
+
+    Input is the post-attention hidden state ``h`` of shape ``[B, L, hidden]``
+    (same tensor that feeds ``run_shared_expert`` and ``Router`` in mlx-vlm).
+    We apply ``pre_feedforward_layernorm_2`` internally — same norm mlx-vlm's
+    ``DecoderLayer.__call__`` applies before ``self.experts(...)``. We do NOT
+    apply ``post_feedforward_layernorm_2`` — that norm lives on the aggregate
+    of all experts and is applied by ``aggregate_experts`` after the weighted
+    sum across experts completes.
+
+    Returned dict maps ``int(eid) -> tensor [B, L, hidden]`` in bfloat16. Keys
+    are exactly ``set(expert_ids)``; empty input yields empty dict.
+
+    Strategy (Strategy A in the Phase 3 plan): reuse the existing
+    ``layer.experts`` module by passing ``top_k_indices=[[eid]]`` (K=1) and
+    ``top_k_weights=[[1.0]]`` per-eid. ``Experts.__call__`` then computes
+    ``expert_out * 1.0`` and sums over the singleton K-dim, which is the
+    identity — so the returned tensor is exactly the raw output of expert
+    ``eid`` applied to every token. This keeps us on the library's
+    gather_mm/gather_qmm fast path (transparent over quantization) and avoids
+    re-implementing SwitchGLU's sort/unsort dance.
+    """
+    if not expert_ids:
+        return {}
+
+    layer = lm.text_model.layers[layer_idx]
+    # Same norm mlx-vlm's DecoderLayer applies before self.experts(...).
+    h_normed = layer.pre_feedforward_layernorm_2(h)
+
+    b, ell, _ = h_normed.shape
+    ones_weights = mx.ones((b, ell, 1), dtype=h_normed.dtype)
+
+    out: dict[int, mx.array] = {}
+    for eid in expert_ids:
+        key = int(eid)
+        indices = mx.full((b, ell, 1), vals=key, dtype=mx.uint32)
+        # Experts.__call__ does: expert_out(B*L,1,H) * weights(B*L,1,1) then
+        # sum(axis=-2) -> (B*L,H) -> reshape to (B,L,H). With K=1 and w=1.0
+        # the multiply+sum is an identity, so we get the raw per-expert output.
+        raw = layer.experts(h_normed, indices, ones_weights)
+        out[key] = raw.astype(mx.bfloat16)
+    return out
+
+
 def run_shared_expert(lm: Any, h: mx.array, layer_idx: int) -> mx.array:
     """Return the dense-branch output ``h1`` for ``layer_idx``.
 
@@ -113,5 +170,6 @@ def run_shared_expert(lm: Any, h: mx.array, layer_idx: int) -> mx.array:
 __all__ = [
     "group_expert_ids_by_owner",
     "run_attention_and_route",
+    "run_selected_experts",
     "run_shared_expert",
 ]
