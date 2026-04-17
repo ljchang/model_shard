@@ -17,7 +17,7 @@ import random
 import threading
 import time
 from collections.abc import Callable
-from typing import Final
+from typing import Any, Final
 
 from model_shard.membership.config import SwimConfig
 from model_shard.membership.messages import (
@@ -29,6 +29,7 @@ from model_shard.membership.records import (
     HeatReportRecord,
     IncomingMessage,
     LoadReportRecord,
+    OutgoingMessage,
     OwnershipDeltaRecord,
     PingMsg,
     PingReqAckMsg,
@@ -242,71 +243,49 @@ class MembershipRunner:
                     break
                 outgoing.extend(self._state.recv(msg, time.monotonic()))
 
-            # Phase 4: piggyback own-load on outgoing ping-family messages.
+            # Fused piggyback pass: compute all three piggybacks up front, then
+            # do a single walk over outgoing — one dataclasses.replace per
+            # payload instead of up to three.
+            my_load: LoadReportRecord | None = None
             if self._load_source is not None:
                 try:
                     my_load = self._load_source()
                 except Exception:
                     _LOG.exception("load source raised; skipping load piggyback")
-                    my_load = None
-                if my_load is not None:
-                    new_outgoing = []
-                    for o in outgoing:
-                        p = o.payload
-                        if isinstance(p, (PingMsg, AckMsg, PingReqMsg, PingReqAckMsg)):
-                            new_payload = dataclasses.replace(
-                                p, loads=[*p.loads, my_load]
-                            )
-                            # OutgoingMessage may be frozen; construct a fresh one.
-                            new_outgoing.append(
-                                dataclasses.replace(o, payload=new_payload)
-                            )
-                        else:
-                            new_outgoing.append(o)
-                    outgoing = new_outgoing
 
+            my_heat: HeatReportRecord | None = None
             if self._heat_source is not None:
                 try:
                     my_heat = self._heat_source()
                 except Exception:
                     _LOG.exception("heat source raised; skipping heat piggyback")
-                    my_heat = None
-                if my_heat is not None:
-                    new_outgoing2 = []
-                    for o in outgoing:
-                        p = o.payload
-                        if isinstance(p, (PingMsg, AckMsg, PingReqMsg, PingReqAckMsg)):
-                            new_payload = dataclasses.replace(
-                                p, heat=[*p.heat, my_heat]
-                            )
-                            new_outgoing2.append(
-                                dataclasses.replace(o, payload=new_payload)
-                            )
-                        else:
-                            new_outgoing2.append(o)
-                    outgoing = new_outgoing2
 
-            # TODO(phase5b): fuse loads + heat + ownership piggyback into a
-            # single outgoing-pass rewrite once Task 17 integrates the
-            # scanner. Three sequential walks is fine now but wasteful.
             # Only drain (and decrement TTL) when there are real outgoing
             # messages to carry the piggyback — otherwise TTL burns without
             # any peer ever receiving the delta (t_tick_ms << t_ping_ms).
             owner_batch = self._drain_outbound_ownership() if outgoing else []
-            if owner_batch:
-                new_outgoing3 = []
+
+            any_piggyback = (
+                my_load is not None or my_heat is not None or bool(owner_batch)
+            )
+            if any_piggyback:
+                fused: list[OutgoingMessage] = []
                 for o in outgoing:
                     p = o.payload
                     if isinstance(p, (PingMsg, AckMsg, PingReqMsg, PingReqAckMsg)):
-                        new_payload = dataclasses.replace(
-                            p, ownership=[*p.ownership, *owner_batch]
-                        )
-                        new_outgoing3.append(
-                            dataclasses.replace(o, payload=new_payload)
-                        )
+                        replace_kwargs: dict[str, Any] = {}
+                        if my_load is not None:
+                            replace_kwargs["loads"] = [*p.loads, my_load]
+                        if my_heat is not None:
+                            replace_kwargs["heat"] = [*p.heat, my_heat]
+                        if owner_batch:
+                            replace_kwargs["ownership"] = [*p.ownership, *owner_batch]
+                        new_payload = dataclasses.replace(p, **replace_kwargs)
+                        # OutgoingMessage may be frozen; construct a fresh one.
+                        fused.append(dataclasses.replace(o, payload=new_payload))
                     else:
-                        new_outgoing3.append(o)
-                outgoing = new_outgoing3
+                        fused.append(o)
+                outgoing = fused
 
             for o in outgoing:
                 addr = self._addr_by_id.get(o.target_shard_id)
