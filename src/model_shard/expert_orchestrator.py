@@ -17,8 +17,9 @@ from __future__ import annotations
 import contextlib
 import socket
 import threading
+import time
 from collections.abc import Iterator, Mapping
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -160,6 +161,21 @@ class ExpertOrchestrator:
     # separate process, so the lock never contends with anything).
     mlx_lock: threading.Lock | None = None
     _executor: ThreadPoolExecutor = field(init=False, repr=False)
+    # Observer-abort bookkeeping. Each active `run_split_layer` registers a
+    # per-peer threading.Event; ``notify_peer_left_alive`` sets every event
+    # whose peer matches, so the polling loop in ``run_split_layer`` can
+    # short-circuit the wait and raise ``ExpertRpcFailure`` instead of
+    # blocking until the TCP timeout fires. Structure:
+    #   {request_id: {peer_shard_id: threading.Event}}
+    # Guarded by ``_in_flight_lock`` because registrations, lookups, and
+    # cleanups cross threads (the fan-out thread pool + the observer thread
+    # + node.py's membership callback thread).
+    _in_flight: dict[str, dict[str, threading.Event]] = field(
+        init=False, repr=False, default_factory=dict
+    )
+    _in_flight_lock: threading.Lock = field(
+        init=False, repr=False, default_factory=threading.Lock
+    )
 
     def __post_init__(self) -> None:
         # One worker per potential peer is plenty for Phase 3's 3-node cluster.
@@ -172,6 +188,29 @@ class ExpertOrchestrator:
         """Shut down the fan-out executor. Idempotent."""
         self._executor.shutdown(wait=False, cancel_futures=True)
 
+    def notify_peer_left_alive(self, peer_shard_id: str) -> None:
+        """Signal every in-flight RPC targeting ``peer_shard_id`` to abort.
+
+        Wired from ``node.py``'s membership observer: when a peer transitions
+        out of ALIVE (SUSPECT or DEAD), any outstanding expert RPC to that
+        peer would otherwise sit on its socket until the TCP timeout. Setting
+        the per-peer event here lets ``run_split_layer``'s polling loop raise
+        ``ExpertRpcFailure`` immediately instead.
+
+        Safe to call for peers with no outstanding RPCs (no-op). Safe to call
+        concurrently from multiple threads.
+        """
+        with self._in_flight_lock:
+            # Snapshot the events to set so we don't hold the lock across
+            # Event.set() (cheap, but keeps the critical section minimal).
+            to_set: list[threading.Event] = []
+            for peers in self._in_flight.values():
+                ev = peers.get(peer_shard_id)
+                if ev is not None:
+                    to_set.append(ev)
+        for ev in to_set:
+            ev.set()
+
     @contextlib.contextmanager
     def _mlx_guard(self) -> Iterator[None]:
         if self.mlx_lock is None:
@@ -182,6 +221,86 @@ class ExpertOrchestrator:
             yield
         finally:
             self.mlx_lock.release()
+
+    def _gather_with_abort(
+        self,
+        futures: dict[str, Future[dict[int, mx.array]]],
+        abort_events: dict[str, threading.Event],
+        outputs: dict[int, mx.array],
+        layer_idx: int,
+    ) -> None:
+        """Block until every peer future resolves, or any peer's abort event
+        fires, or the overall ``rpc_timeout_s`` elapses.
+
+        Polls with 100ms granularity so an observer-triggered abort short-
+        circuits the TCP timeout (up to ~5s) without spin-waiting. On any
+        abort or error this raises ``ExpertRpcFailure``; futures that are
+        still in the queue (not yet running) are cancelled so the pool
+        doesn't issue further RPCs for a dead request.
+        """
+        poll_s = 0.1
+        deadline: float | None = None
+        if self.rpc_timeout_s is not None:
+            deadline = time.monotonic() + self.rpc_timeout_s
+
+        remaining = dict(futures)
+        while remaining:
+            # Abort wins immediately — before we even check completions —
+            # so a fast-firing observer interrupts the wait at once.
+            for peer, ev in abort_events.items():
+                if ev.is_set() and peer in remaining:
+                    self._cancel_all(remaining.values())
+                    raise ExpertRpcFailure(
+                        f"peer {peer!r} left ALIVE mid-request for layer "
+                        f"{layer_idx}"
+                    )
+
+            done_peers: list[str] = []
+            for peer, fut in remaining.items():
+                if fut.done():
+                    try:
+                        outputs.update(fut.result())
+                    except Exception as e:
+                        self._cancel_all(remaining.values())
+                        raise ExpertRpcFailure(
+                            f"expert RPC to peer {peer!r} failed for layer "
+                            f"{layer_idx}: {e}"
+                        ) from e
+                    done_peers.append(peer)
+            for peer in done_peers:
+                del remaining[peer]
+            if not remaining:
+                break
+
+            if deadline is not None:
+                if time.monotonic() >= deadline:
+                    # Any peer that didn't finish is responsible for the
+                    # timeout; surface the first as the failure peer.
+                    stuck_peer = next(iter(remaining))
+                    self._cancel_all(remaining.values())
+                    raise ExpertRpcFailure(
+                        f"expert RPC to peer {stuck_peer!r} failed for layer "
+                        f"{layer_idx}: timeout after {self.rpc_timeout_s}s"
+                    )
+
+            # Wait up to ``poll_s`` on ANY abort event rather than sleeping
+            # blindly: this keeps the loop responsive without spinning.
+            # ``Event.wait`` cannot wait on multiple events at once, so we
+            # poll each; the common case (no abort) returns immediately
+            # after ``poll_s``. When an abort does fire we catch it on the
+            # very next loop iteration.
+            for ev in abort_events.values():
+                if ev.wait(timeout=poll_s / max(1, len(abort_events))):
+                    break
+
+    @staticmethod
+    def _cancel_all(futs: Any) -> None:
+        """Best-effort cancel of any futures still in the queue. Futures that
+        are already running can't be cancelled; the handlers on those peers
+        will eventually time out and return (or drop on TCP close)."""
+        for fut in futs:
+            with contextlib.suppress(Exception):
+                fut.cancel()
 
     def run_split_layer(
         self,
@@ -219,19 +338,30 @@ class ExpertOrchestrator:
         # Phase B — peer fan-out. Lock is deliberately not held here: peer
         # threads need to acquire it to run their experts.
         outputs: dict[int, mx.array] = dict(local_outputs)
-        futures = {
+        futures: dict[str, Future[dict[int, mx.array]]] = {
             peer: self._executor.submit(
                 self.peer_rpc.call, peer, request_id, layer_idx, ids, post_attn
             )
             for peer, ids in by_owner.items()
         }
-        for peer, fut in futures.items():
-            try:
-                outputs.update(fut.result(timeout=self.rpc_timeout_s))
-            except Exception as e:
-                raise ExpertRpcFailure(
-                    f"expert RPC to peer {peer!r} failed for layer {layer_idx}: {e}"
-                ) from e
+        # Register per-peer abort events under this request_id so the
+        # membership observer (via notify_peer_left_alive) can signal us to
+        # stop waiting. We keep the registration even with no peers because
+        # notify_peer_left_alive iterates defensively.
+        abort_events: dict[str, threading.Event] = {
+            peer: threading.Event() for peer in futures
+        }
+        if abort_events:
+            with self._in_flight_lock:
+                self._in_flight[request_id] = abort_events
+        try:
+            self._gather_with_abort(
+                futures, abort_events, outputs, layer_idx
+            )
+        finally:
+            if abort_events:
+                with self._in_flight_lock:
+                    self._in_flight.pop(request_id, None)
 
         # Phase C — aggregation + outer ops. Re-acquire the lock for the
         # final graph construction.

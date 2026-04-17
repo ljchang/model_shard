@@ -664,25 +664,42 @@ class Node:
         )
 
     def _on_membership_change(self, transition: StateTransition) -> None:
-        # Only react to transitions involving our downstream peer (the only
-        # peer this node actively dials). The membership runner observes ALL
-        # transitions; we filter to just the relevant one.
-        if transition.shard_id != self._downstream.shard_id:
-            return
+        # Two concerns:
+        #   (1) Pipeline continuity — close our outbound TCP iff the
+        #       downstream peer (our one forwarding target) left ALIVE.
+        #   (2) Expert-RPC abort — tell the orchestrator so any in-flight
+        #       ExpertRequest to the transitioned peer short-circuits
+        #       instead of blocking on TCP timeout. Applies to ANY peer
+        #       because the orchestrator may RPC to any shard that hosts
+        #       a split-layer expert.
         new_state = transition.new_record.state
-        if new_state.name in ("SUSPECT", "DEAD"):
+        left_alive = (
+            transition.old_state is not None
+            and transition.old_state.name == "ALIVE"
+            and new_state.name in ("SUSPECT", "DEAD")
+        )
+
+        if transition.shard_id == self._downstream.shard_id:
+            if new_state.name in ("SUSPECT", "DEAD"):
+                _LOG.info(
+                    "downstream peer %s -> %s; closing outbound TCP",
+                    transition.shard_id,
+                    new_state.name,
+                )
+                self._close_outbound()
+            elif new_state.name == "ALIVE" and transition.old_state is not None:
+                _LOG.info(
+                    "downstream peer %s -> ALIVE; outbound TCP will redial on next send",
+                    transition.shard_id,
+                )
+                # The lazy `_ensure_out_stream` already redials on next write.
+
+        if left_alive and self._orchestrator is not None:
             _LOG.info(
-                "downstream peer %s -> %s; closing outbound TCP",
-                transition.shard_id,
-                new_state.name,
-            )
-            self._close_outbound()
-        elif new_state.name == "ALIVE" and transition.old_state is not None:
-            _LOG.info(
-                "downstream peer %s -> ALIVE; outbound TCP will redial on next send",
+                "peer %s left ALIVE; aborting in-flight expert RPCs",
                 transition.shard_id,
             )
-            # The lazy `_ensure_out_stream` already redials on next write.
+            self._orchestrator.notify_peer_left_alive(transition.shard_id)
 
     def _unavailable_peer(self) -> str | None:
         if self._membership is None:
