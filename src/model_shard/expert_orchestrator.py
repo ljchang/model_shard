@@ -172,6 +172,8 @@ class ExpertOrchestrator:
     rng: random.Random = field(default_factory=random.Random)
     live_owners_provider: Callable[[int], set[str]] | None = None
     heat_observer: Callable[[int, list[int]], None] | None = None
+    retry_max_attempts: int = 3
+    retry_backoff_ms: tuple[int, ...] = (100, 500)
     _executor: ThreadPoolExecutor = field(init=False, repr=False)
     # Observer-abort bookkeeping. Each active `run_split_layer` registers a
     # per-peer threading.Event; ``notify_peer_left_alive`` sets every event

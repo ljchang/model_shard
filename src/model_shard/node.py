@@ -916,6 +916,8 @@ class Node:
             rng=_random_mod.Random(),
             heat_observer=self._heat_tracker.observe,
             live_owners_provider=_live_owners_for_expert,
+            retry_max_attempts=_expert_retry_max_attempts(),
+            retry_backoff_ms=_expert_retry_backoff_ms(),
         )
 
     def _build_membership_runner(self) -> MembershipRunner:
@@ -1083,6 +1085,23 @@ def _dynamic_migration_enabled() -> bool:
     return os.environ.get("ENABLE_DYNAMIC_MIGRATION", "false").lower() in (
         "1", "true", "yes"
     )
+
+
+def _expert_retry_enabled() -> bool:
+    return os.environ.get("ENABLE_EXPERT_RETRY", "true").lower() in (
+        "1", "true", "yes"
+    )
+
+
+def _expert_retry_max_attempts() -> int:
+    if not _expert_retry_enabled():
+        return 1  # fail-fast, legacy Phase 3 behavior
+    return int(os.environ.get("EXPERT_RETRY_MAX_ATTEMPTS", "3"))
+
+
+def _expert_retry_backoff_ms() -> tuple[int, ...]:
+    raw = os.environ.get("EXPERT_RETRY_BACKOFF_MS", "100,500")
+    return tuple(int(x.strip()) for x in raw.split(",") if x.strip())
 
 
 def _migration_scan_interval_s() -> float:
