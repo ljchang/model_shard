@@ -140,6 +140,7 @@ message Ping {
   uint64 from_incarnation = 3;
   // Up to K_GOSSIP recent membership transitions piggybacked.
   repeated MemberRecordPb deltas = 4;
+  repeated LoadReport loads = 5;  // NEW
 }
 
 message Ack {
@@ -147,6 +148,7 @@ message Ack {
   string from_shard_id = 2;
   uint64 from_incarnation = 3;
   repeated MemberRecordPb deltas = 4;
+  repeated LoadReport loads = 5;  // NEW
 }
 
 message PingReq {
@@ -156,6 +158,7 @@ message PingReq {
   // A correlation id so the requester can match the eventual PingReqAck.
   string probe_id = 4;
   repeated MemberRecordPb deltas = 5;
+  repeated LoadReport loads = 6;  // NEW
 }
 
 message PingReqAck {
@@ -165,6 +168,7 @@ message PingReqAck {
   string probe_id = 4;
   bool success = 5;
   repeated MemberRecordPb deltas = 6;
+  repeated LoadReport loads = 7;  // NEW
 }
 
 message Join {
@@ -206,6 +210,13 @@ message ExpertResponse {
 // ---------------------------------------------------------------------------
 // Envelope. Nodes dispatch on which 'oneof' is set.
 // ---------------------------------------------------------------------------
+
+// Phase 4 — load gossip on the hot plane (piggybacked on SWIM messages).
+message LoadReport {
+  string shard_id       = 1;
+  uint32 queue_depth_ema = 2;  // EMA × 100 (so 250 = 2.5 average)
+  int64  ts_unix_ms     = 3;
+}
 
 message Envelope {
   oneof payload {
