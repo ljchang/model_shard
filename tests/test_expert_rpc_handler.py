@@ -197,3 +197,143 @@ def test_node_expert_request_wrong_shard_returns_error(
     finally:
         node.shutdown()
         t.join(timeout=3)
+
+
+@pytest.mark.slow
+def test_expert_request_handler_replies_error_on_compute_failure(
+    loaded_model, monkeypatch
+) -> None:
+    """If ``run_selected_experts`` raises, the handler must reply with
+    ``Error{ERR_SHARD_UNAVAILABLE}`` (with exception detail) rather than
+    silently dropping the envelope and making the caller wait for TCP
+    timeout. Monkeypatch the moe hook to force a RuntimeError.
+    """
+    monkeypatch.setenv("ENABLE_GOSSIP", "false")
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    # ``_handle_expert_request`` imports ``run_selected_experts`` lazily from
+    # ``model_shard.moe`` every call, so patch it on the source module.
+    import model_shard.moe as _moe
+
+    monkeypatch.setattr(_moe, "run_selected_experts", _boom)
+
+    port = _free_port()
+    node = _solo_node(loaded_model, port, moe_experts={15: (3, 6, 9)})
+
+    t = threading.Thread(target=node.serve_forever, daemon=True)
+    t.start()
+    _wait_listening("127.0.0.1", port)
+
+    try:
+        s = socket.create_connection(("127.0.0.1", port), timeout=10)
+        try:
+            hidden = loaded_model.text_model.config.hidden_size
+            h = mx.random.normal((1, 2, hidden)).astype(mx.bfloat16)
+            mx.eval(h)
+            env, raw = _build_expert_request("r3", 15, [3, 6, 9], h)
+            stream = s.makefile("rwb")
+            send_envelope(stream, env, raw)
+            stream.flush()
+            resp_env, _ = recv_envelope(stream)
+        finally:
+            s.close()
+
+        assert resp_env.WhichOneof("payload") == "error", (
+            f"expected Error, got {resp_env.WhichOneof('payload')}"
+        )
+        assert resp_env.error.code == wire_pb2.ERR_SHARD_UNAVAILABLE, (
+            f"expected ERR_SHARD_UNAVAILABLE, got {resp_env.error.code}"
+        )
+        assert resp_env.error.request_id == "r3"
+        assert "boom" in resp_env.error.detail
+    finally:
+        node.shutdown()
+        t.join(timeout=3)
+
+
+@pytest.mark.slow
+def test_expert_request_handler_rejects_byte_count_mismatch(
+    loaded_model, monkeypatch
+) -> None:
+    """h_spec.byte_count must match the out-of-band tensor payload length.
+    Mismatch -> Error{ERR_INTERNAL}.
+    """
+    monkeypatch.setenv("ENABLE_GOSSIP", "false")
+    port = _free_port()
+    node = _solo_node(loaded_model, port, moe_experts={15: (3, 6, 9)})
+
+    t = threading.Thread(target=node.serve_forever, daemon=True)
+    t.start()
+    _wait_listening("127.0.0.1", port)
+
+    try:
+        s = socket.create_connection(("127.0.0.1", port), timeout=10)
+        try:
+            hidden = loaded_model.text_model.config.hidden_size
+            h = mx.random.normal((1, 2, hidden)).astype(mx.bfloat16)
+            mx.eval(h)
+            env, raw = _build_expert_request("r4", 15, [3, 6, 9], h)
+            # Lie about the payload size: real len(raw) is correct, but we
+            # declare one more byte. Handler must catch this.
+            env.expert_request.h_spec.byte_count = len(raw) + 1
+            stream = s.makefile("rwb")
+            send_envelope(stream, env, raw)
+            stream.flush()
+            resp_env, _ = recv_envelope(stream)
+        finally:
+            s.close()
+
+        assert resp_env.WhichOneof("payload") == "error", (
+            f"expected Error, got {resp_env.WhichOneof('payload')}"
+        )
+        assert resp_env.error.code == wire_pb2.ERR_INTERNAL, (
+            f"expected ERR_INTERNAL, got {resp_env.error.code}"
+        )
+        assert resp_env.error.request_id == "r4"
+        assert "byte_count" in resp_env.error.detail
+    finally:
+        node.shutdown()
+        t.join(timeout=3)
+
+
+@pytest.mark.slow
+def test_expert_request_handler_rejects_empty_expert_ids(
+    loaded_model, monkeypatch
+) -> None:
+    """Empty expert_ids is malformed (nothing to stack) -> Error{ERR_INTERNAL}."""
+    monkeypatch.setenv("ENABLE_GOSSIP", "false")
+    port = _free_port()
+    node = _solo_node(loaded_model, port, moe_experts={15: (3, 6, 9)})
+
+    t = threading.Thread(target=node.serve_forever, daemon=True)
+    t.start()
+    _wait_listening("127.0.0.1", port)
+
+    try:
+        s = socket.create_connection(("127.0.0.1", port), timeout=10)
+        try:
+            hidden = loaded_model.text_model.config.hidden_size
+            h = mx.random.normal((1, 2, hidden)).astype(mx.bfloat16)
+            mx.eval(h)
+            # Empty expert_ids list.
+            env, raw = _build_expert_request("r5", 15, [], h)
+            stream = s.makefile("rwb")
+            send_envelope(stream, env, raw)
+            stream.flush()
+            resp_env, _ = recv_envelope(stream)
+        finally:
+            s.close()
+
+        assert resp_env.WhichOneof("payload") == "error", (
+            f"expected Error, got {resp_env.WhichOneof('payload')}"
+        )
+        assert resp_env.error.code == wire_pb2.ERR_INTERNAL, (
+            f"expected ERR_INTERNAL, got {resp_env.error.code}"
+        )
+        assert resp_env.error.request_id == "r5"
+        assert "empty expert_ids" in resp_env.error.detail
+    finally:
+        node.shutdown()
+        t.join(timeout=3)

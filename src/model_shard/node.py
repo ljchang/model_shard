@@ -329,6 +329,18 @@ class Node:
 
         layer_idx = int(req.layer_idx)
         requested = [int(e) for e in req.expert_ids]
+
+        # S3: empty expert_ids is malformed — the caller must ask for at least
+        # one expert so we have something to stack and reply with.
+        if not requested:
+            _send_error(
+                inbound_stream,
+                req.request_id,
+                wire_pb2.ERR_INTERNAL,
+                f"ExpertRequest for layer {layer_idx} had empty expert_ids",
+            )
+            return
+
         hosted = set(self._shard.moe_experts.get(layer_idx, ()))
         missing = [eid for eid in requested if eid not in hosted]
         if missing:
@@ -343,15 +355,45 @@ class Node:
             )
             return
 
+        # I1: cross-check the out-of-band tensor length against the declared
+        # byte_count before we try to reshape it. A mismatch means the frame
+        # is malformed (sender/receiver disagree on the payload size).
+        if int(req.h_spec.byte_count) != len(tensor_bytes):
+            _send_error(
+                inbound_stream,
+                req.request_id,
+                wire_pb2.ERR_INTERNAL,
+                (
+                    f"ExpertRequest h_spec.byte_count={int(req.h_spec.byte_count)} "
+                    f"does not match tensor payload length {len(tensor_bytes)}"
+                ),
+            )
+            return
+
         h = bytes_to_tensor(
             tensor_bytes,
             shape=list(req.h_spec.shape),
             dtype=req.h_spec.dtype,
         )
-        outputs = run_selected_experts(self._lm, h, layer_idx, requested)
-        # Stack in request order so the caller can unstack by index.
-        stacked = mx.stack([outputs[eid] for eid in requested], axis=2)
-        raw = tensor_to_bytes(stacked)
+
+        # I2: any failure inside the expert compute (OOM, unknown layer in
+        # run_selected_experts, mlx errors) must be reported as
+        # Error{ERR_SHARD_UNAVAILABLE} so the caller fails fast instead of
+        # waiting for TCP timeout. Matches the Phase 2 broken-pipe pattern.
+        try:
+            outputs = run_selected_experts(self._lm, h, layer_idx, requested)
+            # Stack in request order so the caller can unstack by index.
+            stacked = mx.stack([outputs[eid] for eid in requested], axis=2)
+            raw = tensor_to_bytes(stacked)
+        except Exception as exc:  # noqa: BLE001 — intentional catch-all
+            _LOG.exception("expert fan-out raised")
+            _send_error(
+                inbound_stream,
+                req.request_id,
+                wire_pb2.ERR_SHARD_UNAVAILABLE,
+                f"expert execution failed: {exc}",
+            )
+            return
 
         resp = wire_pb2.Envelope()
         resp.expert_response.protocol_version = _PROTOCOL_VERSION
