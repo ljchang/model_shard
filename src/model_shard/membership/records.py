@@ -40,6 +40,29 @@ class LoadReportRecord:
 
 
 @dataclass(frozen=True)
+class HeatReportRecord:
+    """Sparse per-node heat snapshot. ``entries`` is a tuple of
+    ``(layer_idx, expert_id, heat_ema_x100)`` triples sorted by EMA desc,
+    capped at HeatTracker.top_n (default 16)."""
+    shard_id: str
+    entries: tuple[tuple[int, int, int], ...]
+    ts_unix_ms: int
+
+
+@dataclass(frozen=True)
+class OwnershipDeltaRecord:
+    """Idempotent ADD-only ownership announcement (Phase 5b).
+
+    ``action`` is 0 for ADD (only value used in Phase 5b; 1 REMOVE is
+    reserved for Phase 6 eviction)."""
+    shard_id: str
+    layer_idx: int
+    expert_id: int
+    action: int
+    ts_unix_ms: int
+
+
+@dataclass(frozen=True)
 class StateTransition:
     """Emitted from `MembershipState` whenever a member's recorded state changes.
 
@@ -61,6 +84,8 @@ class PingMsg:
     from_incarnation: int
     deltas: list[MemberRecord]
     loads: list[LoadReportRecord] = field(default_factory=list)
+    heat: list[HeatReportRecord] = field(default_factory=list)
+    ownership: list[OwnershipDeltaRecord] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -69,6 +94,8 @@ class AckMsg:
     from_incarnation: int
     deltas: list[MemberRecord]
     loads: list[LoadReportRecord] = field(default_factory=list)
+    heat: list[HeatReportRecord] = field(default_factory=list)
+    ownership: list[OwnershipDeltaRecord] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -78,6 +105,8 @@ class PingReqMsg:
     probe_id: str
     deltas: list[MemberRecord]
     loads: list[LoadReportRecord] = field(default_factory=list)
+    heat: list[HeatReportRecord] = field(default_factory=list)
+    ownership: list[OwnershipDeltaRecord] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -88,6 +117,8 @@ class PingReqAckMsg:
     success: bool
     deltas: list[MemberRecord]
     loads: list[LoadReportRecord] = field(default_factory=list)
+    heat: list[HeatReportRecord] = field(default_factory=list)
+    ownership: list[OwnershipDeltaRecord] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -118,6 +149,7 @@ class OutgoingMessage:
 
 __all__ = [
     "AckMsg",
+    "HeatReportRecord",
     "IncomingMessage",
     "JoinMsg",
     "LoadReportRecord",
@@ -125,6 +157,7 @@ __all__ = [
     "MemberState",
     "MembershipDeltaMsg",
     "OutgoingMessage",
+    "OwnershipDeltaRecord",
     "PingMsg",
     "PingReqAckMsg",
     "PingReqMsg",
