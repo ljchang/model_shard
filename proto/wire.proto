@@ -78,6 +78,7 @@ message Activation {
   string request_id = 2;
   uint32 next_layer_idx = 3;   // the layer the RECEIVING node should run next
   TensorDescriptor tensor = 4; // describes the accompanying tensor bytes
+  repeated ProvenanceEntryPb provenance = 5;  // NEW: Phase 6-B
 }
 
 message Logits {
@@ -109,6 +110,7 @@ enum ErrorCode {
   ERR_PROTOCOL_VERSION = 3;
   ERR_INTERNAL = 4;
   ERR_SHARD_UNAVAILABLE = 5;  // Phase 2: a required shard is suspect/dead.
+  ERR_INVALID_PROVENANCE = 6;  // NEW: Phase 6-B
 }
 
 message Error {
@@ -204,6 +206,7 @@ message ExpertRequest {
   repeated uint32 expert_ids = 4;  // experts to run on the receiving node
   TensorDescriptor h_spec = 5;     // describes the accompanying post-attention
                                    // hidden-state tensor [B, L, hidden]
+  repeated ProvenanceEntryPb provenance = 6;  // NEW: Phase 6-B
 }
 
 message ExpertResponse {
@@ -214,6 +217,7 @@ message ExpertResponse {
   // stacks per-expert outputs on a new dim: [B, L, len(expert_ids), hidden].
   repeated uint32 expert_ids = 4;
   TensorDescriptor outputs_spec = 5;
+  repeated ProvenanceEntryPb provenance = 6;  // NEW: Phase 6-B
 }
 
 // ---------------------------------------------------------------------------
@@ -265,6 +269,35 @@ message ExpertWeightTransfer {
   uint32 expert_id        = 4;
   repeated TensorDescriptor tensors = 5;  // exactly 9, fixed order (see spec §3.4)
   uint32 tensor_count     = 6;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6-B — provenance tracking.
+// ---------------------------------------------------------------------------
+
+enum OpType {
+  OP_TYPE_UNSPECIFIED     = 0;
+  OP_EMBED                = 1;
+  OP_LAYER_ATOMIC         = 2;
+  OP_ATTENTION_ROUTE      = 3;
+  OP_EXPERT               = 4;
+  OP_AGGREGATE            = 5;
+  OP_FINALIZE             = 6;
+  OP_SHARED_EXPERT        = 7;
+}
+
+message OpDescriptorPb {
+  OpType op_type   = 1;
+  uint32 layer_idx = 2;
+  uint32 expert_id = 3;
+}
+
+message ProvenanceEntryPb {
+  bytes hash                   = 1;
+  repeated bytes parent_hashes = 2;
+  string node_id               = 3;
+  OpDescriptorPb op            = 4;
+  double timestamp             = 5;
 }
 
 message Envelope {
