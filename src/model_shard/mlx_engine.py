@@ -13,7 +13,7 @@ Gemma 4 26B A4B specifics baked in:
   * final_logit_softcapping = 30.0.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
 
@@ -32,6 +32,9 @@ class LoadedModel:
     text_model: Any          # Gemma4TextModel (exposes layers, embed_tokens, norm)
     processor: Any           # tokenizer/processor
     num_layers: int
+    # Phase 5a: per-layer tuple of held routed-expert global ids. Empty dict
+    # (or an absent layer_idx key) means that layer holds all 128 experts.
+    held_ids_per_layer: dict[int, tuple[int, ...]] = field(default_factory=dict)
 
 
 @partial(mx.compile, shapeless=True)
@@ -183,3 +186,12 @@ def bytes_to_tensor(raw: bytes, shape: list[int], dtype: int) -> mx.array:
     if mx_dtype == mx.bfloat16:
         arr = arr.view(mx.bfloat16)
     return arr
+
+
+def load_model_partial(
+    hf_id: str,
+    held_experts_per_layer: dict[int, list[int]],
+) -> LoadedModel:
+    """Phase 5a wrapper. See partial_load.load_model_partial for semantics."""
+    from model_shard.partial_load import load_model_partial as _impl
+    return _impl(hf_id, held_experts_per_layer)
