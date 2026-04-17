@@ -36,6 +36,12 @@ from model_shard.moe import (
 )
 
 
+class ExpertRpcFailure(RuntimeError):  # noqa: N818 — explicit name per plan
+    """Raised by ExpertOrchestrator when a peer RPC fails (timeout, broken
+    pipe, observer-triggered close). The node's request handler translates
+    this into Error{SHARD_UNAVAILABLE, is_final=true} for the client."""
+
+
 class PeerRPC(Protocol):
     def call(
         self,
@@ -223,8 +229,8 @@ class ExpertOrchestrator:
             try:
                 outputs.update(fut.result(timeout=self.rpc_timeout_s))
             except Exception as e:
-                raise RuntimeError(
-                    f"expert RPC to {peer} failed for layer {layer_idx}: {e}"
+                raise ExpertRpcFailure(
+                    f"expert RPC to peer {peer!r} failed for layer {layer_idx}: {e}"
                 ) from e
 
         # Phase C — aggregation + outer ops. Re-acquire the lock for the
@@ -270,4 +276,4 @@ class ExpertOrchestrator:
         return out
 
 
-__all__ = ["ExpertOrchestrator", "PeerRPC", "TcpPeerRPC"]
+__all__ = ["ExpertOrchestrator", "ExpertRpcFailure", "PeerRPC", "TcpPeerRPC"]

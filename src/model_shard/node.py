@@ -40,7 +40,11 @@ import mlx.core as mx
 
 from model_shard._pb import wire_pb2
 from model_shard.envelope import recv_envelope, send_envelope
-from model_shard.expert_orchestrator import ExpertOrchestrator, TcpPeerRPC
+from model_shard.expert_orchestrator import (
+    ExpertOrchestrator,
+    ExpertRpcFailure,
+    TcpPeerRPC,
+)
 from model_shard.membership import MembershipRunner, PeerSpec, SwimConfig
 from model_shard.membership.records import StateTransition
 from model_shard.mlx_engine import (
@@ -197,7 +201,7 @@ class Node:
         if which == "begin":
             self._handle_begin(env.begin, inbound_stream)
         elif which == "activation":
-            self._handle_activation(env.activation, tensor_bytes)
+            self._handle_activation(env.activation, tensor_bytes, inbound_stream)
         elif which == "sampled_token":
             self._handle_sampled_token(env.sampled_token)
         elif which == "end":
@@ -245,7 +249,21 @@ class Node:
         prompt_tokens = list(req.prompt_token_ids)
         token_ids = mx.array([prompt_tokens])
         h = embed_tokens(self._lm, token_ids)
-        h = self._run_my_layers(h, cache, request_id=req.request_id)
+        try:
+            h = self._run_my_layers(h, cache, request_id=req.request_id)
+        except ExpertRpcFailure as exc:
+            _LOG.warning("prefill aborted by expert RPC failure: %s", exc)
+            with contextlib.suppress(OSError):
+                _send_error(
+                    client_stream,
+                    req.request_id,
+                    wire_pb2.ERR_SHARD_UNAVAILABLE,
+                    str(exc),
+                )
+            with self._state_lock:
+                self._kv_caches.pop(req.request_id, None)
+                self._head_states.pop(req.request_id, None)
+            return
         self._forward_activation(req.request_id, h)
 
         # Decode loop. Blocks on the queue until the tail returns tokens.
@@ -292,9 +310,24 @@ class Node:
             with self._state_lock:
                 self._kv_caches.pop(request_id, None)
                 self._head_states.pop(request_id, None)
+        except ExpertRpcFailure as exc:
+            _LOG.warning("decode loop aborted by expert RPC failure: %s", exc)
+            with contextlib.suppress(OSError):
+                _send_error(
+                    state.client_stream,
+                    request_id,
+                    wire_pb2.ERR_SHARD_UNAVAILABLE,
+                    str(exc),
+                )
+            with self._state_lock:
+                self._kv_caches.pop(request_id, None)
+                self._head_states.pop(request_id, None)
 
     def _handle_activation(
-        self, act: wire_pb2.Activation, tensor_bytes: bytes
+        self,
+        act: wire_pb2.Activation,
+        tensor_bytes: bytes,
+        inbound_stream: BinaryIO,
     ) -> None:
         if int(act.next_layer_idx) != self._shard.start_layer:
             _LOG.error(
@@ -310,7 +343,32 @@ class Node:
         h = bytes_to_tensor(
             tensor_bytes, shape=list(act.tensor.shape), dtype=act.tensor.dtype
         )
-        h = self._run_my_layers(h, cache, request_id=act.request_id)
+        try:
+            h = self._run_my_layers(h, cache, request_id=act.request_id)
+        except ExpertRpcFailure as exc:
+            # Reuse the Phase 2 broken-pipe pattern: send an Error envelope
+            # back upstream on the inbound connection and close both the
+            # inbound and outbound sockets so the upstream peer's next write
+            # fails with a broken pipe (which its own decode loop then
+            # converts to Error{SHARD_UNAVAILABLE} for the client).
+            _LOG.warning(
+                "activation aborted by expert RPC failure on %s: %s",
+                self._shard.shard_id,
+                exc,
+            )
+            with contextlib.suppress(OSError):
+                _send_error(
+                    inbound_stream,
+                    act.request_id,
+                    wire_pb2.ERR_SHARD_UNAVAILABLE,
+                    str(exc),
+                )
+            with contextlib.suppress(OSError):
+                inbound_stream.close()
+            self._close_outbound()
+            with self._state_lock:
+                self._kv_caches.pop(act.request_id, None)
+            return
 
         if self.is_tail:
             logits = finalize(self._lm, h)
