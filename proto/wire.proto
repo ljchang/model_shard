@@ -179,6 +179,31 @@ message MembershipDelta {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 3 — expert-level sharding fan-out.
+// Sent node-to-node over the TCP envelope transport. Tensor payloads travel
+// out-of-band, same as Activation.
+// ---------------------------------------------------------------------------
+
+message ExpertRequest {
+  uint32 protocol_version = 1;
+  string request_id = 2;
+  uint32 layer_idx = 3;
+  repeated uint32 expert_ids = 4;  // experts to run on the receiving node
+  TensorDescriptor h_spec = 5;     // describes the accompanying post-attention
+                                   // hidden-state tensor [B, L, hidden]
+}
+
+message ExpertResponse {
+  uint32 protocol_version = 1;
+  string request_id = 2;
+  uint32 layer_idx = 3;
+  // Same id order as the corresponding ExpertRequest. The response tensor
+  // stacks per-expert outputs on a new dim: [B, L, len(expert_ids), hidden].
+  repeated uint32 expert_ids = 4;
+  TensorDescriptor outputs_spec = 5;
+}
+
+// ---------------------------------------------------------------------------
 // Envelope. Nodes dispatch on which 'oneof' is set.
 // ---------------------------------------------------------------------------
 
@@ -198,5 +223,7 @@ message Envelope {
     PingReqAck ping_req_ack = 11;
     Join join = 12;
     MembershipDelta membership_delta = 13;
+    ExpertRequest expert_request = 14;
+    ExpertResponse expert_response = 15;
   }
 }
