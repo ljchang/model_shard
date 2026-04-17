@@ -9,7 +9,7 @@ equivalence test for the correctness proof.
 from __future__ import annotations
 
 import random
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import mlx.core as mx
@@ -234,24 +234,20 @@ def group_expert_ids_by_owner_loaded(
     self_shard_id: str,
     self_load: int,
     rng: random.Random,
+    live_owners_provider: Callable[[int], set[str]] | None = None,
 ) -> dict[str, list[int]]:
     """Partition top_k_ids by owner using power-of-two-choices on load.
 
-    Each id in top_k_ids is assigned to exactly one of its candidate owners.
-    If only one candidate owns the id, it wins uncontested. With two
-    candidates, both are compared and the lower-loaded wins. With >=3
-    candidates, two are sampled uniformly and the lower-loaded of those wins.
-
-    Loads are keyed by shard_id:
-      * peer_loads[sid] - integer EMA x 100 from most recent gossip.
-      * self_shard_id / self_load - the caller's own measurement.
-      * A candidate with no known load is assigned INT_MAX so any known
-        candidate beats it.
+    If ``live_owners_provider`` is not None, candidate owners for each id are
+    taken from ``static_owners(eid) | live_owners_provider(eid)`` — i.e. the
+    union of bootstrap ``owners`` and whatever the callback reports. Phase 5b
+    injects gossip-observed ADD deltas through this callback so routing picks
+    up new replicas without restarting the orchestrator.
     """
-    candidates_by_id: dict[int, list[str]] = {}
+    static_candidates_by_id: dict[int, list[str]] = {}
     for owner, ids in owners.items():
         for i in ids:
-            candidates_by_id.setdefault(i, []).append(owner)
+            static_candidates_by_id.setdefault(i, []).append(owner)
 
     def load_of(sid: str) -> int:
         if sid == self_shard_id:
@@ -262,16 +258,21 @@ def group_expert_ids_by_owner_loaded(
 
     by_owner: dict[str, list[int]] = {}
     for eid in top_k_ids:
-        candidates = candidates_by_id.get(eid)
-        if not candidates:
+        static = static_candidates_by_id.get(eid, [])
+        live_extra = (
+            list(live_owners_provider(eid)) if live_owners_provider is not None else []
+        )
+        # Preserve order (static first) while deduping.
+        combined = list(dict.fromkeys([*static, *live_extra]))
+        if not combined:
             raise KeyError(f"expert_id {eid} has no owner in {list(owners)}")
-        if len(candidates) == 1:
-            winner = candidates[0]
+        if len(combined) == 1:
+            winner = combined[0]
         else:
             pool = (
-                list(candidates)
-                if len(candidates) == 2
-                else rng.sample(candidates, 2)
+                list(combined)
+                if len(combined) == 2
+                else rng.sample(combined, 2)
             )
             winner = min(pool, key=load_of)
         by_owner.setdefault(winner, []).append(eid)
