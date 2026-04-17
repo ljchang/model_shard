@@ -173,6 +173,10 @@ class Node:
             self._handle_sampled_token(env.sampled_token)
         elif which == "end":
             self._handle_end(env.end)
+        elif which == "expert_request":
+            self._handle_expert_request(
+                env.expert_request, tensor_bytes, inbound_stream
+            )
         else:
             _LOG.warning("unknown envelope payload %r", which)
 
@@ -306,6 +310,59 @@ class Node:
             # Intentionally do NOT drop _debug_captures here — tests read them
             # after the request completes. Production impact is a tiny memory
             # retention per request; cleared explicitly via clear_debug_captures().
+
+    def _handle_expert_request(
+        self,
+        req: wire_pb2.ExpertRequest,
+        tensor_bytes: bytes,
+        inbound_stream: BinaryIO,
+    ) -> None:
+        """Run this shard's hosted experts for ``req.layer_idx`` and reply
+        with an ``ExpertResponse``.
+
+        Fail with ``Error{ERR_WRONG_SHARD}`` if the client asks for any
+        expert id this shard does not own — we must not silently run only
+        the subset we host, because the caller would stack in-order outputs
+        and get wrong aggregation.
+        """
+        from model_shard.moe import run_selected_experts
+
+        layer_idx = int(req.layer_idx)
+        requested = [int(e) for e in req.expert_ids]
+        hosted = set(self._shard.moe_experts.get(layer_idx, ()))
+        missing = [eid for eid in requested if eid not in hosted]
+        if missing:
+            _send_error(
+                inbound_stream,
+                req.request_id,
+                wire_pb2.ERR_WRONG_SHARD,
+                (
+                    f"shard {self._shard.shard_id!r} does not host experts "
+                    f"{missing} for layer {layer_idx}"
+                ),
+            )
+            return
+
+        h = bytes_to_tensor(
+            tensor_bytes,
+            shape=list(req.h_spec.shape),
+            dtype=req.h_spec.dtype,
+        )
+        outputs = run_selected_experts(self._lm, h, layer_idx, requested)
+        # Stack in request order so the caller can unstack by index.
+        stacked = mx.stack([outputs[eid] for eid in requested], axis=2)
+        raw = tensor_to_bytes(stacked)
+
+        resp = wire_pb2.Envelope()
+        resp.expert_response.protocol_version = _PROTOCOL_VERSION
+        resp.expert_response.request_id = req.request_id
+        resp.expert_response.layer_idx = layer_idx
+        resp.expert_response.expert_ids.extend(requested)
+        resp.expert_response.outputs_spec.shape.extend(list(stacked.shape))
+        resp.expert_response.outputs_spec.dtype = _dtype_to_wire(stacked.dtype)
+        resp.expert_response.outputs_spec.quant = wire_pb2.QUANT_NONE
+        resp.expert_response.outputs_spec.byte_count = len(raw)
+        send_envelope(inbound_stream, resp, raw)
 
     # ------------------------------------------------------------ forwarding
 
