@@ -665,11 +665,15 @@ Per spec §8: the Gemma 4 DecoderLayer has two parallel branches summed as peers
 
 Append to `src/model_shard/moe.py`:
 
+Attribute names verified against mlx-vlm `DecoderLayer.__call__` lines 74-76 (see `.venv/lib/python3.13/site-packages/mlx_vlm/models/gemma4/language.py`): `layer.pre_feedforward_layernorm`, `layer.mlp`, `layer.post_feedforward_layernorm_1` are all direct attributes of the DecoderLayer when `enable_moe=True`.
+
 ```python
 def run_shared_expert(lm: Any, h: mx.array, layer_idx: int) -> mx.array:
-    """Return the dense-branch output `h1` for layer_idx, per spec §8.
+    """Return the dense-branch output `h1` for layer_idx.
 
-    Concretely: h1 = post_feedforward_layernorm_1(mlp(pre_feedforward_layernorm(h))).
+    Concretely (matching DecoderLayer.__call__ lines 74-76 when enable_moe=True):
+        h1 = post_feedforward_layernorm_1(mlp(pre_feedforward_layernorm(h)))
+
     Always-local — weights are replicated on every node.
     """
     layer = lm.text_model.layers[layer_idx]
@@ -677,8 +681,6 @@ def run_shared_expert(lm: Any, h: mx.array, layer_idx: int) -> mx.array:
         layer.mlp(layer.pre_feedforward_layernorm(h))
     )
 ```
-
-Verify the exact attribute names against `layer_idx=15` of the loaded model before adopting — read one DecoderLayer in mlx-vlm's `language.py` to confirm `pre_feedforward_layernorm`, `post_feedforward_layernorm_1`, and `mlp` are the right identifiers.
 
 - [ ] **Step 4: Run — expect pass**
 
@@ -740,11 +742,33 @@ Expected: `ImportError`.
 
 - [ ] **Step 3: Implement**
 
-Per spec §8 (resolved), mlx-vlm's MoE is **sparse** — `mlx_lm.models.switch_layers.SwitchGLU` uses `mx.gather_mm` / `mx.gather_qmm` with `rhs_indices=top_k_indices` against a stacked weight tensor `(num_experts, out, in)`. To reproduce bit-exactly while running only a subset of experts per node, we:
+Per spec §8 (resolved), the routed-experts path in `DecoderLayer.__call__` (lines 78-81) is:
 
-1. Apply `pre_feedforward_layernorm_2` to `h` (stateless; weights replicated).
-2. Call a `SwitchGLU`-style gather forward with `indices` restricted to the intersection of `top_k_indices` and `expert_ids` (this node's locally-hosted experts).
-3. Return each selected expert's *pre-weighting, pre-post-norm* output keyed by expert-id. Aggregation (gated sum across top-k slots and `post_feedforward_layernorm_2`) is handled in `aggregate_experts`.
+```
+top_k_indices, top_k_weights = self.router(h)
+h2 = self.pre_feedforward_layernorm_2(h)
+h2 = self.experts(h2, top_k_indices, top_k_weights)   # weighted-sum inside Experts
+h2 = self.post_feedforward_layernorm_2(h2)
+```
+
+`self.experts` is on the DecoderLayer directly (NOT `self.mlp.experts` — `self.mlp` is the dense branch's single MLP). `self.experts` wraps a `SwitchGLU` in `mlx_lm/models/switch_layers.py` that uses `mx.gather_mm` / `mx.gather_qmm` with `rhs_indices=top_k_indices` against stacked weight tensors of shape `(num_experts, out, in)`.
+
+The atomic `Experts.__call__` computes per-token:
+```
+expert_out = gather_mm(h, indices=top_k_indices)    # [B, L, k, hidden]
+weighted = expert_out * top_k_weights[..., None]
+return weighted.sum(axis=-2)                          # [B, L, hidden]
+```
+
+For distribution, each node owns a subset of the 128 experts. `run_selected_experts(lm, h, 15, expert_ids)` computes the raw per-expert output for each `eid in expert_ids` — a single tensor `[B, L, hidden]` per expert — without applying top-k weights or `post_feedforward_layernorm_2`. Aggregation happens in `aggregate_experts`.
+
+Two plausible implementation strategies; pick the one that matches mlx-vlm's quant-group numerics when running Task 9:
+
+**Strategy A — per-expert `SwitchGLU` call with single-expert indices.** For each `eid`, build `indices = mx.full((B*L, 1), eid)` and `weights = mx.ones((B*L, 1))`. Call `layer.experts(h_normed, indices, weights)`. Because the singleton-slot weighted sum with weight 1 equals the raw expert output, the returned tensor is what we want. Reshape back to `[B, L, hidden]`.
+
+**Strategy B — single batched gather for the union.** Build `indices = mx.array([expert_ids])` tiled over tokens, weights=ones, one `layer.experts(...)` call, then split the returned tensor per expert. Fewer kernel launches. But because `Experts.__call__` returns the already-summed tensor (not per-slot), this doesn't directly expose individual expert outputs — you'd need to bypass `Experts.__call__` and call into `SwitchGLU` / `SwitchLinear` directly with `rhs_indices=[eid]` per expert.
+
+For the prototype, **Strategy A is simpler and bit-exact** provided quantization groups are handled identically. Verify by reading `mlx_lm/models/switch_layers.py` (`SwitchGLU.__call__`, `SwitchLinear.__call__`).
 
 ```python
 def run_selected_experts(
@@ -755,53 +779,33 @@ def run_selected_experts(
 ) -> dict[int, mx.array]:
     """Run a subset of the routed experts for `layer_idx` on `h`.
 
-    Caller passes the post-attention residual `h` (NOT pre-normed); this
-    function applies `pre_feedforward_layernorm_2` internally to keep the
-    wire payload minimal and avoid relying on caller normalisation.
+    Caller passes the post-attention hidden state `h` (NOT pre-normed); this
+    function applies `pre_feedforward_layernorm_2` internally.
 
-    Returns {expert_id: per-expert output tensor} with shape [B, L, hidden]
-    each. Per-expert outputs have not yet been multiplied by top-k weights
-    nor passed through post_feedforward_layernorm_2 — aggregate_experts
-    does that.
+    Returns {expert_id: [B, L, hidden]} — raw per-expert outputs BEFORE
+    applying top-k weights and BEFORE post_feedforward_layernorm_2.
+    aggregate_experts handles both of those.
     """
     if not expert_ids:
         return {}
     layer = lm.text_model.layers[layer_idx]
     h_normed = layer.pre_feedforward_layernorm_2(h)
+    B, L, H = h_normed.shape
 
-    # SwitchGLU-style call: stacked expert weights, gather by id.
-    # mlx-vlm's Experts accepts (h, top_k_indices, top_k_weights) but folds
-    # the weighted sum internally, which we don't want here. Call the
-    # underlying stacked GLU directly with batched indices that select
-    # *only* our expert_ids, and with dummy uniform weights so the module's
-    # internal sum is a no-op over the singleton output axis.
-    # The exact API is confirmed by reading mlx-vlm's Experts.__call__ and
-    # SwitchGLU.__call__; adapt if names differ.
+    # Strategy A: one gather call per expert with weight=1. The SwitchGLU
+    # returns `expert_out * 1.0` summed over a singleton slot, i.e. the
+    # raw per-expert output.
     per_expert: dict[int, mx.array] = {}
+    one_weight = mx.ones((B * L, 1), dtype=h_normed.dtype)
+    h_flat = h_normed.reshape(B * L, H)
     for eid in expert_ids:
-        per_expert[int(eid)] = _run_one_expert(layer, h_normed, int(eid))
+        idx = mx.full((B * L, 1), int(eid), dtype=mx.int32)
+        out_flat = layer.experts(h_flat[:, None, :], idx, one_weight)  # [B*L, hidden]
+        per_expert[int(eid)] = out_flat.reshape(B, L, H)
     return per_expert
-
-
-def _run_one_expert(layer: Any, h_normed: mx.array, eid: int) -> mx.array:
-    """Compute one routed expert's output on the already-pre-normed input.
-    Uses the same stacked weight layout mlx-vlm uses so quantization
-    groups and dtypes match."""
-    # gate/up/down projections live in layer.mlp.experts (SwitchGLU).
-    # Invoke it with a single-expert index to reuse its gather_mm path.
-    exp = layer.mlp.experts
-    idx = mx.array([[eid]])  # shape [1, 1] — one token, one expert slot
-    weight = mx.array([[1.0]])  # dummy weight, output pre-weight anyway
-    # The SwitchGLU forward returns weighted sum across the slot axis;
-    # with one slot and weight=1, it's equivalent to the unweighted expert
-    # output on h_normed broadcast across B,L. Validate shapes before use.
-    B, L = h_normed.shape[:-1]
-    h_flat = h_normed.reshape(B * L, -1)[:, None, :]          # [B*L, 1, hidden]
-    out_flat = exp(h_flat, idx.repeat(B * L, axis=0), weight.repeat(B * L, axis=0))
-    return out_flat.reshape(B, L, -1)
 ```
 
-**Note:** the exact SwitchGLU API (whether it takes flat/unflattened tensors, how it broadcasts, whether `weights` can truly be 1.0 without triggering a fused path) must be verified by reading `mlx_lm/models/switch_layers.py` before committing. If the one-expert-at-a-time call is awkward, an alternative is to pass the full intersection list as a single gather call and decode the returned tensor back into the dict — choose whichever matches mlx-vlm's numerics exactly. The split-equivalence test (Task 9) is the final arbiter.
+**Verification step (do this before committing the test passes):** run Task 9's `test_layer15_split_equivalent_to_atomic` with this implementation to confirm bit-equality. If it fails, inspect dtypes and quant groups — SwitchLinear may emit different numerics for a single-index gather vs. a multi-index one due to block quantization, in which case Strategy B (batched call + split) is the fallback. Exact shapes of `h_flat[:, None, :]` vs what `SwitchGLU.__call__` expects must be confirmed against `switch_layers.py`.
 
 - [ ] **Step 4: Run — expect pass**
 
@@ -1027,11 +1031,13 @@ def test_layer15_split_equivalent_to_atomic(loaded_model) -> None:
     shared_out = run_shared_expert(lm, post_attn, layer_idx)
     post_ffn_ln_2 = tm.layers[layer_idx].post_feedforward_layernorm_2
 
-    # aggregate_experts operates per-position; here top_k_ids is [B, L, k],
-    # so we loop positions to honor per-token top-k. In production the
-    # orchestrator will lift this into a vectorized op — but for the proof
-    # the per-position version is sufficient.
-    out_split = mx.zeros_like(out_atomic)
+    # aggregate_experts returns per-position (h1 + h2), matching mlx-vlm's
+    # DecoderLayer lines 82 (`h = h1 + h2`). The outer ops — post_feedforward_layernorm,
+    # second residual, and layer_scalar (lines 83-88, 107) — are applied AFTER
+    # per-position aggregation to produce the final layer output. Per-layer-input
+    # gating is skipped because Gemma 4 26B has hidden_size_per_layer_input=0
+    # (per_layer_input_gate is None).
+    h1_plus_h2 = mx.zeros_like(post_attn)
     for b in range(top_k_ids.shape[0]):
         for l in range(top_k_ids.shape[1]):
             ids = [int(x) for x in top_k_ids[b, l].tolist()]
@@ -1041,9 +1047,15 @@ def test_layer15_split_equivalent_to_atomic(loaded_model) -> None:
             agg = aggregate_experts(
                 per_pos_outs, ids, weights, per_pos_shared, post_ffn_ln_2
             )
-            out_split = mx.concatenate(
-                [out_split[:, :l, :], agg, out_split[:, l + 1 :, :]], axis=1
-            ) if out_split.shape[1] > 1 else agg
+            h1_plus_h2 = mx.concatenate(
+                [h1_plus_h2[:, :l, :], agg, h1_plus_h2[:, l + 1 :, :]], axis=1
+            ) if h1_plus_h2.shape[1] > 1 else agg
+
+    layer = tm.layers[layer_idx]
+    out_split = layer.post_feedforward_layernorm(h1_plus_h2)
+    out_split = post_attn + out_split
+    if layer.layer_scalar is not None:
+        out_split = out_split * layer.layer_scalar
 
     mx.eval(out_atomic, out_split)
     # Bit-exact equivalence.
@@ -1213,8 +1225,9 @@ class ExpertOrchestrator:
             outputs.update(peer_outputs)
 
         # Aggregate per position; same shape pattern as Task 9's proof.
-        post_ffn_ln_2 = lm.text_model.layers[layer_idx].post_feedforward_layernorm_2
-        out = mx.zeros_like(post_attn)
+        layer = lm.text_model.layers[layer_idx]
+        post_ffn_ln_2 = layer.post_feedforward_layernorm_2
+        h1_plus_h2 = mx.zeros_like(post_attn)
         for b in range(top_k_ids.shape[0]):
             for l in range(top_k_ids.shape[1]):
                 ids = [int(x) for x in top_k_ids[b, l].tolist()]
@@ -1226,7 +1239,23 @@ class ExpertOrchestrator:
                 agg = aggregate_experts(
                     per_pos, ids, weights, per_pos_shared, post_ffn_ln_2
                 )
-                out = out.at[:, l : l + 1, :].add(agg)  # or concat-splice if `at` unavailable
+                # Splice position l of h1_plus_h2 with the per-position agg.
+                h1_plus_h2 = mx.concatenate(
+                    [h1_plus_h2[:, :l, :], agg, h1_plus_h2[:, l + 1 :, :]],
+                    axis=1,
+                ) if h1_plus_h2.shape[1] > 1 else agg
+
+        # Outer layer ops from DecoderLayer.__call__ lines 83-88, 107:
+        #   h = post_feedforward_layernorm(h1 + h2)
+        #   h = residual_2 + h
+        #   h = h * layer_scalar
+        # The per-layer-input gating branch (lines 92-105) is skipped here
+        # because Gemma 4 26B has hidden_size_per_layer_input=0, so the gate
+        # modules are None. If that assumption changes, add a guard.
+        out = layer.post_feedforward_layernorm(h1_plus_h2)
+        out = post_attn + out
+        if layer.layer_scalar is not None:
+            out = out * layer.layer_scalar
         return out
 
 
