@@ -41,7 +41,16 @@ from model_shard.moe import (
 class ExpertRpcFailure(RuntimeError):  # noqa: N818 — explicit name per plan
     """Raised by ExpertOrchestrator when a peer RPC fails (timeout, broken
     pipe, observer-triggered close). The node's request handler translates
-    this into Error{SHARD_UNAVAILABLE, is_final=true} for the client."""
+    this into Error{SHARD_UNAVAILABLE, is_final=true} for the client.
+
+    Phase 6-A: gains typed ``failed_peer`` and ``layer_idx`` fields so the
+    retry loop in ``run_split_layer`` can exclude the known-failed peer
+    from subsequent dispatches."""
+
+    def __init__(self, message: str, *, failed_peer: str, layer_idx: int) -> None:
+        super().__init__(message)
+        self.failed_peer = failed_peer
+        self.layer_idx = layer_idx
 
 
 class PeerRPC(Protocol):
@@ -255,7 +264,9 @@ class ExpertOrchestrator:
                     self._cancel_all(remaining.values())
                     raise ExpertRpcFailure(
                         f"peer {peer!r} left ALIVE mid-request for layer "
-                        f"{layer_idx}"
+                        f"{layer_idx}",
+                        failed_peer=peer,
+                        layer_idx=layer_idx,
                     )
 
             done_peers: list[str] = []
@@ -267,7 +278,9 @@ class ExpertOrchestrator:
                         self._cancel_all(remaining.values())
                         raise ExpertRpcFailure(
                             f"expert RPC to peer {peer!r} failed for layer "
-                            f"{layer_idx}: {e}"
+                            f"{layer_idx}: {e}",
+                            failed_peer=peer,
+                            layer_idx=layer_idx,
                         ) from e
                     done_peers.append(peer)
             for peer in done_peers:
@@ -282,7 +295,9 @@ class ExpertOrchestrator:
                 self._cancel_all(remaining.values())
                 raise ExpertRpcFailure(
                     f"expert RPC to peer {stuck_peer!r} failed for layer "
-                    f"{layer_idx}: timeout after {self.rpc_timeout_s}s"
+                    f"{layer_idx}: timeout after {self.rpc_timeout_s}s",
+                    failed_peer=stuck_peer,
+                    layer_idx=layer_idx,
                 )
 
             # Wait up to ``poll_s`` on ANY abort event rather than sleeping
