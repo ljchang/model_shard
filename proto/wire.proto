@@ -23,6 +23,7 @@ enum DType {
   DTYPE_INT32 = 4;
   DTYPE_INT8 = 5;
   DTYPE_UINT8 = 6;
+  DTYPE_UINT32 = 7;  // NEW: packed quantized 4-bit weights (uint32 raw)
 }
 
 enum QuantScheme {

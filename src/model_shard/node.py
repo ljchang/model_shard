@@ -60,6 +60,7 @@ from model_shard.mlx_engine import (
     run_layers,
     tensor_to_bytes,
 )
+from model_shard.partial_load import slice_expert
 from model_shard.shard_map import ShardMap, ShardSpec
 
 _LOG = logging.getLogger(__name__)
@@ -248,6 +249,10 @@ class Node:
         elif which == "expert_request":
             self._handle_expert_request(
                 env.expert_request, tensor_bytes, inbound_stream
+            )
+        elif which == "expert_weight_request":
+            self._handle_expert_weight_request(
+                env.expert_weight_request, inbound_stream
             )
         else:
             _LOG.warning("unknown envelope payload %r", which)
@@ -556,6 +561,46 @@ class Node:
             self._in_flight_expert_requests -= 1
             self._load_tracker.observe(self._in_flight_expert_requests)
 
+    def _handle_expert_weight_request(
+        self,
+        req: wire_pb2.ExpertWeightRequest,
+        inbound_stream: BinaryIO,
+    ) -> None:
+        """Source-side of Phase 5b migration: slice the requested expert
+        out of our compact stack and reply with ExpertWeightTransfer.
+
+        Error{ERR_SHARD_UNAVAILABLE} on miss (expert no longer held)."""
+        layer_idx = int(req.layer_idx)
+        expert_id = int(req.expert_id)
+        try:
+            tensors = slice_expert(
+                self._lm, layer_idx, expert_id, _MLX_COMPUTE_LOCK
+            )
+        except KeyError as e:
+            _send_error(
+                inbound_stream,
+                req.request_id,
+                wire_pb2.ERR_SHARD_UNAVAILABLE,
+                str(e),
+            )
+            return
+        resp = wire_pb2.Envelope()
+        resp.expert_weight_transfer.protocol_version = _PROTOCOL_VERSION
+        resp.expert_weight_transfer.request_id = req.request_id
+        resp.expert_weight_transfer.layer_idx = layer_idx
+        resp.expert_weight_transfer.expert_id = expert_id
+        resp.expert_weight_transfer.tensor_count = 9
+        blobs: list[bytes] = []
+        for t in tensors:
+            d = resp.expert_weight_transfer.tensors.add()
+            d.shape.extend(list(t.shape))
+            d.dtype = _dtype_to_wire(t.dtype)
+            d.quant = wire_pb2.QUANT_NONE
+            raw = tensor_to_bytes(t)
+            d.byte_count = len(raw)
+            blobs.append(raw)
+        send_envelope(inbound_stream, resp, b"".join(blobs))
+
     # ------------------------------------------------------------ forwarding
 
     def _run_my_layers(
@@ -814,6 +859,8 @@ def _dtype_to_wire(dt: mx.Dtype) -> int:
         return int(wire_pb2.DTYPE_FLOAT32)
     if dt == mx.float16:
         return int(wire_pb2.DTYPE_FLOAT16)
+    if dt == mx.uint32:
+        return int(wire_pb2.DTYPE_UINT32)
     raise ValueError(f"unsupported activation dtype: {dt}")
 
 

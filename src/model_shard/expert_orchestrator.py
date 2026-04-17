@@ -66,6 +66,8 @@ def _dtype_to_wire(dt: mx.Dtype) -> int:
         return int(wire_pb2.DTYPE_FLOAT32)
     if dt == mx.float16:
         return int(wire_pb2.DTYPE_FLOAT16)
+    if dt == mx.uint32:
+        return int(wire_pb2.DTYPE_UINT32)
     raise ValueError(f"unsupported activation dtype: {dt}")
 
 

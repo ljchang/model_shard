@@ -205,3 +205,60 @@ def three_node_pipeline_expert_split(
             os.environ.pop("ENABLE_EXPERT_SHARD", None)
         else:
             os.environ["ENABLE_EXPERT_SHARD"] = prev_flag
+
+
+@pytest.fixture(scope="module")
+def partial_load_fixture():
+    """Spin up a single Node with partial load at layer 15 = [0,3,6,9].
+
+    Used by Phase 5b source-side and migration TCP tests."""
+    import os
+    import socket as _sk
+    import threading as _th
+    import time as _time
+
+    os.environ["ENABLE_PARTIAL_LOAD"] = "true"
+    os.environ["ENABLE_GOSSIP"] = "false"
+
+    from model_shard.node import Node
+    from model_shard.shard_map import NodeAddress, ShardMap, ShardSpec
+
+    def _free_port() -> int:
+        s = _sk.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        return port
+
+    port = _free_port()
+    # The "src" shard covers all 30 layers. As the tail node it needs a
+    # downstream entry in the ShardMap with start_layer=0 that is not itself
+    # (for _resolve_downstream). We add a dummy "src-head" entry pointing at
+    # the same address; the node will try to connect to it only when forwarding
+    # activations, which does not happen in ExpertWeightRequest handling.
+    dummy_port = _free_port()
+    spec = ShardSpec(
+        shard_id="src",
+        address=NodeAddress(host="127.0.0.1", port=port),
+        start_layer=0,
+        end_layer=30,
+        moe_experts={15: (0, 3, 6, 9)},
+    )
+    dummy_spec = ShardSpec(
+        shard_id="src-head",
+        address=NodeAddress(host="127.0.0.1", port=dummy_port),
+        start_layer=0,
+        end_layer=30,
+    )
+    sm = ShardMap({"src": spec, "src-head": dummy_spec})
+    node = Node(shard=spec, shard_map=sm, total_layers=30)
+    t = _th.Thread(target=node.serve_forever, daemon=True)
+    t.start()
+    _time.sleep(0.5)
+    try:
+        yield (node, port)
+    finally:
+        node.shutdown()
+        t.join(timeout=2.0)
+        os.environ.pop("ENABLE_PARTIAL_LOAD", None)
+        os.environ.pop("ENABLE_GOSSIP", None)

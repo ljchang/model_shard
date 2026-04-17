@@ -155,6 +155,7 @@ _DTYPE_MAP: dict[int, tuple[mx.Dtype, np.dtype, int]] = {
     wire_pb2.DTYPE_INT32: (mx.int32, np.dtype("int32"), 4),
     wire_pb2.DTYPE_INT8: (mx.int8, np.dtype("int8"), 1),
     wire_pb2.DTYPE_UINT8: (mx.uint8, np.dtype("uint8"), 1),
+    wire_pb2.DTYPE_UINT32: (mx.uint32, np.dtype("uint32"), 4),  # NEW
 }
 
 
