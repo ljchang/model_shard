@@ -182,3 +182,58 @@ def test_retry_disabled_matches_phase5b_behavior():
             owners=owners, ids_to_fan=[7], peer_rpc=rpc, live_owners=live,
             max_attempts=1,
         )
+
+
+def test_retry_to_self_cleans_up_in_flight():
+    """If retry routes all missing experts to self (e.g., all peer replicas
+    excluded), _in_flight must not retain a stale entry for this request."""
+    # B owns {7}, self also owns {7}. B fails once; retry should route 7 to self.
+    owners = {"B": {7}, "self": {7}}
+    live = {7: {"B", "self"}}
+    rpc = _FlakyPeerRPC(fail_once_for={"B"})
+
+    import random
+
+    import model_shard.expert_orchestrator as orch_mod
+
+    # Fake lm with run_selected_experts — the helper runs local experts
+    # when routed to self after exclusions.
+    class _FakeLm:
+        pass
+
+    # Monkey-patch moe.run_selected_experts so the local-on-retry path succeeds.
+
+    def _fake_rse(lm, h, layer_idx, ids):
+        return {eid: mx.full((1, 1, 8), float(eid), dtype=mx.bfloat16) for eid in ids}
+
+    orig = orch_mod.run_selected_experts
+    orch_mod.run_selected_experts = _fake_rse
+    try:
+        orch = ExpertOrchestrator(
+            self_shard_id="self",
+            owners=owners,
+            peer_rpc=rpc,
+            rpc_timeout_s=1.0,
+            rng=random.Random(0),
+            live_owners_provider=lambda eid: live.get(eid, set()),
+            retry_max_attempts=3,
+            retry_backoff_ms=(0, 0),
+        )
+        post_attn = mx.zeros((1, 1, 8), dtype=mx.bfloat16)
+        outputs = orch._phase_b_with_retry(
+            post_attn=post_attn,
+            all_ids=[7],
+            layer_idx=15,
+            request_id="r-leak",
+            initial_local_ids=[],
+            lm=_FakeLm(),
+        )
+        assert 7 in outputs
+        # The critical assertion: no leaked _in_flight entry.
+        with orch._in_flight_lock:
+            assert "r-leak" not in orch._in_flight, (
+                f"_in_flight leaked: {orch._in_flight}"
+            )
+        orch.close()
+    finally:
+        orch_mod.run_selected_experts = orig

@@ -370,9 +370,13 @@ class ExpertOrchestrator:
         abort_events: dict[str, threading.Event] = {
             peer: threading.Event() for peer in futures
         }
+        # Track whether we EVER registered in _in_flight, not just the current
+        # attempt's state — so the finally block's cleanup is unconditional.
+        registered = False
         if abort_events:
             with self._in_flight_lock:
                 self._in_flight[request_id] = abort_events
+                registered = True
 
         excluded_peers: set[str] = set()
         attempts = 0
@@ -455,8 +459,9 @@ class ExpertOrchestrator:
                     if abort_events:
                         with self._in_flight_lock:
                             self._in_flight[request_id] = abort_events
+                            registered = True
         finally:
-            if abort_events:
+            if registered:
                 with self._in_flight_lock:
                     self._in_flight.pop(request_id, None)
 
