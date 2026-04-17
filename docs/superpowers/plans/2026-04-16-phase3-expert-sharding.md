@@ -585,24 +585,22 @@ def run_attention_and_route(
     mask = global_mask if layer.layer_type == "full_attention" else sliding_mask
     c = cache[tm.layer_idx_to_cache_idx[layer_idx]]
 
-    # Attention sub-block — exact call sequence matches mlx-vlm.
-    # (Confirmed in Task 1; adjust field names here if they differ.)
+    # Attention sub-block — verified against mlx-vlm DecoderLayer in Task 5.
+    residual = h
     x = layer.input_layernorm(h)
     x = layer.self_attn(x, mask, c)
     x = layer.post_attention_layernorm(x)
-    post_attn = h + x                      # residual
+    post_attn = residual + x
 
-    # Router: produces logits over 128 experts; top-k with softmax gating.
-    router_logits = layer.mlp.router(post_attn)          # [B, L, 128]
-    top_k_weights, top_k_ids = mx.topk(
-        router_logits, k=lm.language_model.top_k_experts, axis=-1
-    )
-    top_k_weights = mx.softmax(top_k_weights, axis=-1)
+    # Router is on DecoderLayer directly (NOT layer.mlp.router). It already
+    # returns (top_k_indices, top_k_weights) with weights L1-renormalized
+    # and scaled by per_expert_scale. Do NOT apply extra softmax or renorm.
+    top_k_ids, top_k_weights = layer.router(post_attn)
 
     return post_attn, top_k_ids, top_k_weights
 ```
 
-NOTE: the method/attribute names (`input_layernorm`, `self_attn`, `post_attention_layernorm`, `mlp.router`) must match the real model. If Task 1 found a different layout, update accordingly. The split-equivalence test in Task 9 catches any mismatch.
+NOTE: attribute names verified in Task 5 against `.venv/lib/python3.13/site-packages/mlx_vlm/models/gemma4/language.py` lines 244-352. `layer.router` lives on `DecoderLayer` — not `layer.mlp.router`. Router's output is pre-finalized (no extra normalization needed).
 
 - [ ] **Step 4: Run — expect pass**
 
