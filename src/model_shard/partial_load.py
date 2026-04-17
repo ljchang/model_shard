@@ -13,6 +13,7 @@ load unchanged on every node.
 from __future__ import annotations
 
 import logging
+import threading
 
 import mlx.core as mx
 import numpy as np
@@ -98,4 +99,58 @@ def load_model_partial(
     )
 
 
-__all__ = ["_slice_stacked_by_axis0", "load_model_partial"]
+# Canonical order matches the on-wire ExpertWeightTransfer payload (spec §3.4).
+_PROJ_ATTR_ORDER: list[tuple[str, str]] = [
+    ("gate_proj", "weight"), ("gate_proj", "scales"), ("gate_proj", "biases"),
+    ("up_proj",   "weight"), ("up_proj",   "scales"), ("up_proj",   "biases"),
+    ("down_proj", "weight"), ("down_proj", "scales"), ("down_proj", "biases"),
+]
+
+
+def slice_expert(
+    lm: LoadedModel,
+    layer_idx: int,
+    expert_id: int,
+    mlx_lock: threading.Lock,
+) -> list[mx.array]:
+    """Return the 9 tensors for one expert in canonical order.
+
+    Translates ``expert_id`` to a local slot via ``lm.held_ids_per_layer``,
+    then ``mx.take`` along axis 0. Held lock only during take + eval.
+    Raises KeyError if ``expert_id`` is not held on this node."""
+    held = lm.held_ids_per_layer.get(layer_idx)
+    if held is None or expert_id not in held:
+        raise KeyError(
+            f"expert {expert_id} not held at layer {layer_idx} "
+            f"(held ids: {held})"
+        )
+    local_slot = list(held).index(expert_id)
+    layer = lm.text_model.layers[layer_idx]
+    switch_glu = layer.experts.switch_glu
+    with mlx_lock:
+        out: list[mx.array] = []
+        idx = mx.array([local_slot])
+        for proj_name, attr in _PROJ_ATTR_ORDER:
+            proj = getattr(switch_glu, proj_name)
+            full = getattr(proj, attr)
+            # Take axis 0 at the single slot and squeeze the leading dim.
+            sliced = mx.take(full, idx, axis=0)[0]
+            out.append(sliced)
+        mx.eval(*out)
+    return out
+
+
+def attach_expert(
+    lm: LoadedModel,
+    layer_idx: int,
+    expert_id: int,
+    tensors: "list[mx.array]",
+    mlx_lock: threading.Lock,
+) -> None:
+    """Attach received expert tensors into the local model in-place.
+
+    Stub — full implementation in Task 6."""
+    raise NotImplementedError("attach_expert is implemented in Task 6")
+
+
+__all__ = ["_slice_stacked_by_axis0", "attach_expert", "load_model_partial", "slice_expert"]
