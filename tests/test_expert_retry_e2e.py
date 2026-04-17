@@ -79,7 +79,7 @@ def test_retry_keeps_generation_alive_after_replica_death(
     ports = [_find_free_port() for _ in ids]
 
     specs = []
-    for sid, port in zip(ids, ports):
+    for sid, port in zip(ids, ports, strict=True):
         s = sm_yaml.lookup(sid)
         specs.append(
             ShardSpec(
@@ -150,7 +150,7 @@ def test_retry_keeps_generation_alive_after_replica_death(
     done.wait(timeout=30.0)
 
     # Clean up remaining nodes.
-    for i, (n, th) in enumerate(zip(nodes, threads)):
+    for i, (n, th) in enumerate(zip(nodes, threads, strict=True)):
         if i != kill_idx and th.is_alive():
             n.shutdown()
             th.join(timeout=3.0)

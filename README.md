@@ -69,6 +69,40 @@ carryover from 5a §7.5: sort-path FP noise limits bit-exactness to B*Seq ≤ 7 
 prompts ≤ 8 tokens — documented in the spec. See
 `docs/superpowers/specs/2026-04-17-phase5b-dynamic-migration-design.md`.
 
+## Phase 6-A status: Expert-Peer Retry — complete
+
+When a peer fails mid-fan-out, the node's local `ExpertOrchestrator` now retries to
+an alternate replica rather than surfacing `ExpertRpcFailure` immediately. The retry
+loop lives in `ExpertOrchestrator._phase_b_with_retry` inside `run_split_layer` Phase B.
+Each invocation maintains a per-call excluded-peer set; on failure the failed peer is
+added to that set and `live_owners_provider` is re-queried with exclusions applied,
+so subsequent attempts land on a different replica. Partial outputs from peers that
+already completed are preserved across the retry; only the failed slot is re-dispatched.
+Decentralization is fully preserved: the retry decision is local to the node performing
+the fan-out — no central coordinator is consulted.
+
+Gate: `ENABLE_EXPERT_RETRY=true` (default). Env knobs: `EXPERT_RETRY_MAX_ATTEMPTS`
+(default 3) and `EXPERT_RETRY_BACKOFF_MS` (default "100,500", comma-separated list of
+per-attempt delays in milliseconds). Setting `ENABLE_EXPERT_RETRY=false` reverts to
+Phase 3 behavior (immediate failure on any peer error).
+
+Correctness proof: `tests/test_expert_retry_bit_exact.py` asserts `mx.array_equal`
+between a no-failure run and a one-shot-failure-plus-retry run on real Gemma weights
+across all 6 experts. This relies on Phase 5b's property that any valid replica of
+expert E produces identical output to any other. E2E coverage:
+`tests/test_expert_retry_e2e.py` kills a replica-holding shard mid-generation and
+verifies the client exits cleanly — either via retry-carries-through or via the Phase 5b
+Task 18 queue-poison fallback. In the canonical 3-node config every shard is
+simultaneously a pipeline peer and an expert host, so killing any shard breaks the
+activation pipeline; the E2E therefore exercises the no-hang fallback path. The pure
+replica-preserving retry path is proven by the unit and bit-exact tests.
+
+Non-goals: pipeline-peer failure (requires redundant-layer-range design in shards.yaml —
+separate sub-project), head-peer failure (client-side story), Byzantine (Phase 6-B).
+Phase 6 decomposes into three independent sub-projects: 6-A (retry, this), 6-B
+(provenance verification), and 6-C (eviction + REMOVE OwnershipDelta). See
+`docs/superpowers/specs/2026-04-17-phase6a-expert-retry-design.md`.
+
 ## Phase 4 status: Load-Aware Routing — complete
 
 Nodes now gossip a compact queue-depth EMA to each other via `LoadReport` piggybacked
