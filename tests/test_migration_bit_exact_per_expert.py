@@ -43,27 +43,31 @@ def _synthetic_h(lm_full) -> mx.array:
     return mx.random.normal((1, 7, hidden)).astype(mx.bfloat16)
 
 
-def test_slice_from_a_equals_attach_on_b(lm_full, lm_a, lm_b):
+@pytest.fixture(scope="module")
+def lm_b_post_migrate(lm_a, lm_b):
+    """Perform the A→B migration of expert 3 once per module run.
+
+    Both bit-exact tests depend on this so the attach happens exactly once
+    regardless of test execution order."""
     lock = threading.Lock()
     tensors = slice_expert(lm_a, _LAYER, _MIGRATED_EXPERT, lock)
     attach_expert(lm_b, _LAYER, _MIGRATED_EXPERT, tensors, lock)
-    assert _MIGRATED_EXPERT in lm_b.held_ids_per_layer[_LAYER]
+    return lm_b
+
+
+def test_slice_from_a_equals_attach_on_b(lm_full, lm_a, lm_b_post_migrate):
+    assert _MIGRATED_EXPERT in lm_b_post_migrate.held_ids_per_layer[_LAYER]
 
     h = _synthetic_h(lm_full)
     out_a = run_selected_experts(lm_a, h, _LAYER, [_MIGRATED_EXPERT])
-    out_b = run_selected_experts(lm_b, h, _LAYER, [_MIGRATED_EXPERT])
+    out_b = run_selected_experts(lm_b_post_migrate, h, _LAYER, [_MIGRATED_EXPERT])
     assert mx.array_equal(out_a[_MIGRATED_EXPERT], out_b[_MIGRATED_EXPERT]).item()
 
 
-def test_both_equal_full_model_baseline(lm_full, lm_a, lm_b):
-    # Idempotent: if test above already attached, skip the attach.
-    lock = threading.Lock()
-    if _MIGRATED_EXPERT not in lm_b.held_ids_per_layer[_LAYER]:
-        tensors = slice_expert(lm_a, _LAYER, _MIGRATED_EXPERT, lock)
-        attach_expert(lm_b, _LAYER, _MIGRATED_EXPERT, tensors, lock)
+def test_both_equal_full_model_baseline(lm_full, lm_a, lm_b_post_migrate):
     h = _synthetic_h(lm_full)
     out_full = run_selected_experts(lm_full, h, _LAYER, [_MIGRATED_EXPERT])
     out_a = run_selected_experts(lm_a, h, _LAYER, [_MIGRATED_EXPERT])
-    out_b = run_selected_experts(lm_b, h, _LAYER, [_MIGRATED_EXPERT])
+    out_b = run_selected_experts(lm_b_post_migrate, h, _LAYER, [_MIGRATED_EXPERT])
     assert mx.array_equal(out_full[_MIGRATED_EXPERT], out_a[_MIGRATED_EXPERT]).item()
     assert mx.array_equal(out_full[_MIGRATED_EXPERT], out_b[_MIGRATED_EXPERT]).item()
