@@ -289,7 +289,10 @@ class MembershipRunner:
             # TODO(phase5b): fuse loads + heat + ownership piggyback into a
             # single outgoing-pass rewrite once Task 17 integrates the
             # scanner. Three sequential walks is fine now but wasteful.
-            owner_batch = self._drain_outbound_ownership()
+            # Only drain (and decrement TTL) when there are real outgoing
+            # messages to carry the piggyback — otherwise TTL burns without
+            # any peer ever receiving the delta (t_tick_ms << t_ping_ms).
+            owner_batch = self._drain_outbound_ownership() if outgoing else []
             if owner_batch:
                 new_outgoing3 = []
                 for o in outgoing:
