@@ -171,6 +171,7 @@ class ExpertOrchestrator:
         default_factory=lambda: (lambda: {})
     )
     rng: random.Random = field(default_factory=random.Random)
+    live_owners_provider: Callable[[int], set[str]] | None = None
     _executor: ThreadPoolExecutor = field(init=False, repr=False)
     # Observer-abort bookkeeping. Each active `run_split_layer` registers a
     # per-peer threading.Event; ``notify_peer_left_alive`` sets every event
@@ -344,6 +345,7 @@ class ExpertOrchestrator:
                 self_shard_id=self.self_shard_id,
                 self_load=self_load,
                 rng=self.rng,
+                live_owners_provider=self.live_owners_provider,
             )
 
             local_ids = by_owner.pop(self.self_shard_id, [])
