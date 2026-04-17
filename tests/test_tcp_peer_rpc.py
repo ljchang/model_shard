@@ -101,6 +101,23 @@ def test_tcp_peer_rpc_roundtrip() -> None:
         assert out[eid].shape == h.shape
 
 
+def test_orchestrator_close_is_idempotent() -> None:
+    from model_shard.expert_orchestrator import ExpertOrchestrator, PeerRPC
+
+    class _Rpc(PeerRPC):
+        def call(self, *a, **kw):  # type: ignore[no-untyped-def]
+            raise AssertionError
+
+    orch = ExpertOrchestrator(
+        self_shard_id="s",
+        owners={"s": set()},
+        peer_rpc=_Rpc(),
+        rpc_timeout_s=1.0,
+    )
+    orch.close()
+    orch.close()  # must not raise
+
+
 def test_tcp_peer_rpc_roundtrip_bf16_is_bit_exact() -> None:
     """bf16 is the production dtype for activations; round-trip must be exact."""
     ids = [1, 2, 5]

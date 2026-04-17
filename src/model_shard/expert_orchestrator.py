@@ -137,9 +137,9 @@ class ExpertOrchestrator:
     """Runs one decoder layer with experts partitioned across shards.
 
     Not frozen: holds a ``ThreadPoolExecutor`` for parallel peer fan-out.
-    The executor lifetime matches the orchestrator instance; callers that
-    create per-request orchestrators pay executor construction overhead,
-    so keep a single orchestrator per node per decode loop.
+    The executor lifetime matches the orchestrator instance. Create one
+    orchestrator per node for the lifetime of the decode loop, and call
+    ``close()`` on shutdown to release the fan-out executor threads.
     """
 
     self_shard_id: str
@@ -154,6 +154,10 @@ class ExpertOrchestrator:
         self._executor = ThreadPoolExecutor(
             max_workers=8, thread_name_prefix="expert-rpc"
         )
+
+    def close(self) -> None:
+        """Shut down the fan-out executor. Idempotent."""
+        self._executor.shutdown(wait=False, cancel_futures=True)
 
     def run_split_layer(
         self,
