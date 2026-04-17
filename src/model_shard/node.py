@@ -71,6 +71,12 @@ from model_shard.shard_map import ShardMap, ShardSpec
 
 _LOG = logging.getLogger(__name__)
 _PROTOCOL_VERSION = 1
+_POISON_TOKEN: int = -1
+
+
+class PeerLeftAliveError(RuntimeError):
+    """Raised inside _drive_decode_loop when the membership observer
+    poisons the token queue because a peer left ALIVE mid-decode."""
 
 # Process-wide MLX serialization lock. In production each node is its own
 # process, so this lock never contends. In the in-process test fixture we run
@@ -395,6 +401,10 @@ class Node:
         try:
             while state.generated < state.max_new_tokens:
                 token_id = state.token_queue.get()
+                if token_id == _POISON_TOKEN:
+                    raise PeerLeftAliveError(
+                        f"request {request_id}: peer left ALIVE mid-decode"
+                    )
                 state.generated += 1
                 is_final = state.generated >= state.max_new_tokens
 
@@ -432,6 +442,18 @@ class Node:
                 self._head_states.pop(request_id, None)
         except ExpertRpcFailure as exc:
             _LOG.warning("decode loop aborted by expert RPC failure: %s", exc)
+            with contextlib.suppress(OSError):
+                _send_error(
+                    state.client_stream,
+                    request_id,
+                    wire_pb2.ERR_SHARD_UNAVAILABLE,
+                    str(exc),
+                )
+            with self._state_lock:
+                self._kv_caches.pop(request_id, None)
+                self._head_states.pop(request_id, None)
+        except PeerLeftAliveError as exc:
+            _LOG.warning("decode loop aborted by peer-left-alive: %s", exc)
             with contextlib.suppress(OSError):
                 _send_error(
                     state.client_stream,
@@ -949,6 +971,17 @@ class Node:
             )
             self._orchestrator.notify_peer_left_alive(transition.shard_id)
 
+        if left_alive:
+            with self._state_lock:
+                states = list(self._head_states.values())
+            for st in states:
+                try:
+                    st.token_queue.put_nowait(_POISON_TOKEN)
+                except queue.Full:
+                    # Fallback: blocking put. Queue is unbounded by default
+                    # so this should not happen.
+                    st.token_queue.put(_POISON_TOKEN)
+
     def _unavailable_peer(self) -> str | None:
         if self._membership is None:
             return None
@@ -1070,4 +1103,4 @@ def _migration_max_experts_per_layer() -> int:
     return int(os.environ.get("MIGRATION_MAX_EXPERTS_PER_LAYER", "128"))
 
 
-__all__ = ["Node"]
+__all__ = ["Node", "PeerLeftAliveError"]
