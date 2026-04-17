@@ -9,6 +9,9 @@ equivalence test for the correctness proof.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import Any
+
+import mlx.core as mx
 
 
 def group_expert_ids_by_owner(
@@ -38,4 +41,49 @@ def group_expert_ids_by_owner(
     return by_owner
 
 
-__all__ = ["group_expert_ids_by_owner"]
+def run_attention_and_route(
+    lm: Any,
+    h: mx.array,
+    layer_idx: int,
+    cache: list[Any],
+    masks: tuple[Any, Any],
+) -> tuple[mx.array, mx.array, mx.array]:
+    """Run attention + LN + router for one Gemma4 decoder layer.
+
+    Returns the post-attention hidden state (input to the MoE block's two
+    parallel branches) and the router's top-k expert ids / weights. Does not
+    run any experts — the caller feeds ids/weights into fan-out and
+    ``aggregate_experts``.
+
+    Mirrors the first half of mlx-vlm ``DecoderLayer.__call__`` (gemma4
+    language.py): ``residual + post_attention_layernorm(self_attn(
+    input_layernorm(x), mask, cache))``. The router is then called on this
+    tensor directly — it has its own internal RMSNorm, so we do not pre-norm.
+
+    The returned ``top_k_indices`` / ``top_k_weights`` are whatever the
+    ``Router`` module produces: weights are already L1-renormalized and
+    multiplied by ``per_expert_scale[top_k_indices]``. Downstream code must
+    not re-softmax or re-normalize them.
+    """
+    tm = lm.text_model
+    layer = tm.layers[layer_idx]
+    global_mask, sliding_mask = masks
+    mask = global_mask if layer.layer_type == "full_attention" else sliding_mask
+    c = cache[tm.layer_idx_to_cache_idx[layer_idx]]
+
+    # Attention sub-block (verified against mlx_vlm.models.gemma4.language.
+    # DecoderLayer.__call__): input_layernorm -> self_attn -> post_attention_layernorm
+    # with a residual from x.
+    residual = h
+    x = layer.input_layernorm(h)
+    x = layer.self_attn(x, mask, c)
+    x = layer.post_attention_layernorm(x)
+    post_attn = residual + x
+
+    # Router lives directly on the DecoderLayer (layer.router), not under
+    # layer.mlp. It returns (top_k_indices, top_k_weights) already scaled.
+    top_k_ids, top_k_weights = layer.router(post_attn)
+    return post_attn, top_k_ids, top_k_weights
+
+
+__all__ = ["group_expert_ids_by_owner", "run_attention_and_route"]
