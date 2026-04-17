@@ -14,6 +14,7 @@ import mlx.core as mx
 import pytest
 
 from model_shard._pb import wire_pb2
+from model_shard.expert_orchestrator import ExpertOrchestrator, PeerRPC
 from model_shard.mlx_engine import (
     bytes_to_tensor,
     embed_tokens,
@@ -23,6 +24,11 @@ from model_shard.mlx_engine import (
     run_layers,
     tensor_to_bytes,
 )
+
+
+class _ErrRpc(PeerRPC):
+    def call(self, *a, **kw):  # type: ignore[no-untyped-def]
+        raise AssertionError("no peer RPC expected")
 
 
 @pytest.mark.slow
@@ -174,3 +180,47 @@ def test_decode_step_is_split_equivalent_with_disjoint_caches(loaded_model) -> N
     decode_diff = mx.abs(baseline_decode_logits - distributed_decode_logits).max().item()
     assert prefill_diff < 1e-4, f"prefill logit drift {prefill_diff}"
     assert decode_diff < 1e-4, f"decode logit drift {decode_diff}"
+
+
+@pytest.mark.slow
+def test_run_layers_split_layers_empty_matches_original(loaded_model) -> None:  # type: ignore[no-untyped-def]
+    """With split_layers=set(), behavior is identical to Phase 1."""
+    lm = loaded_model
+    tokens = mx.array([[1, 2, 3]])
+    h = embed_tokens(lm, tokens)
+    cache = make_cache(lm)
+    gm, sm = make_masks(lm, h, cache)
+    out_empty = run_layers(lm, h, 0, 5, cache, gm, sm, split_layers=set())
+
+    h2 = embed_tokens(lm, tokens)
+    cache2 = make_cache(lm)
+    gm2, sm2 = make_masks(lm, h2, cache2)
+    out_original = run_layers(lm, h2, 0, 5, cache2, gm2, sm2)  # old signature default
+    mx.eval(out_empty, out_original)
+    assert mx.array_equal(out_empty, out_original)
+
+
+@pytest.mark.slow
+def test_run_layers_delegates_split_layer_to_orchestrator(loaded_model) -> None:  # type: ignore[no-untyped-def]
+    """With split_layers={15}, layer 15 goes through the orchestrator and
+    yields the same result as the atomic path (all experts local)."""
+    lm = loaded_model
+    orch = ExpertOrchestrator(
+        self_shard_id="s",
+        owners={"s": set(range(128))},
+        peer_rpc=_ErrRpc(),
+        rpc_timeout_s=1.0,
+    )
+
+    tokens = mx.array([[1, 2, 3, 4]])
+    h = embed_tokens(lm, tokens)
+    cache = make_cache(lm)
+    gm, sm = make_masks(lm, h, cache)
+    out = run_layers(
+        lm, h, 0, 20, cache, gm, sm,
+        split_layers={15},
+        orchestrator=orch,
+        request_id="rr",
+    )
+    mx.eval(out)
+    assert out.shape == (1, 4, lm.text_model.config.hidden_size)

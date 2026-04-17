@@ -97,18 +97,40 @@ def run_layers(
     cache: list[Any],
     global_mask: Any,
     sliding_mask: Any,
+    split_layers: set[int] | None = None,
+    orchestrator: Any = None,
+    request_id: str = "",
 ) -> mx.array:
     """Run transformer layers in the half-open range [start_layer, end_layer).
 
     Mutates `cache` in place (MLX KV caches update on each call). The caller
     owns cache lifetime — in Phase 1 that's the node hosting the layer.
+
+    For ``i in split_layers``, delegate to ``orchestrator.run_split_layer``.
+    All other layers run atomically (Phase 1 behavior). ``split_layers=None``
+    is equivalent to an empty set.
     """
     tm = lm.text_model
+    split = split_layers or set()
     for i in range(start_layer, end_layer):
-        layer = tm.layers[i]
-        c = cache[tm.layer_idx_to_cache_idx[i]]
-        mask = global_mask if layer.layer_type == "full_attention" else sliding_mask
-        h = layer(h, mask, c, per_layer_input=None)
+        if i in split:
+            if orchestrator is None:
+                raise ValueError(
+                    f"layer {i} is split but no orchestrator given"
+                )
+            h = orchestrator.run_split_layer(
+                lm,
+                h=h,
+                layer_idx=i,
+                cache=cache,
+                masks=(global_mask, sliding_mask),
+                request_id=request_id,
+            )
+        else:
+            layer = tm.layers[i]
+            c = cache[tm.layer_idx_to_cache_idx[i]]
+            mask = global_mask if layer.layer_type == "full_attention" else sliding_mask
+            h = layer(h, mask, c, per_layer_input=None)
     return h
 
 
