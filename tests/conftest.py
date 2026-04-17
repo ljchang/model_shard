@@ -27,9 +27,20 @@ def loaded_model() -> Any:
 
 
 def _find_free_port() -> int:
-    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
+    # Phase 2 derives UDP gossip port = tcp_port + 1000. macOS ephemeral
+    # ports can land above 64535, making tcp+1000 overflow 65535. Pick a
+    # random free port in 30000-60000 to keep derived ports valid.
+    import random
+
+    for _ in range(100):
+        port = random.randint(30000, 60000)
+        try:
+            with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
+                s.bind(("127.0.0.1", port))
+            return port
+        except OSError:
+            continue
+    raise RuntimeError("could not obtain a free port in 30000-60000 after 100 tries")
 
 
 def _wait_for_listening(host: str, port: int, timeout: float = 5.0) -> None:
