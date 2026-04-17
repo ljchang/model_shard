@@ -141,6 +141,8 @@ message Ping {
   // Up to K_GOSSIP recent membership transitions piggybacked.
   repeated MemberRecordPb deltas = 4;
   repeated LoadReport loads = 5;  // NEW
+  repeated ExpertHeatReport heat      = 6;  // NEW
+  repeated OwnershipDelta   ownership = 7;  // NEW
 }
 
 message Ack {
@@ -149,6 +151,8 @@ message Ack {
   uint64 from_incarnation = 3;
   repeated MemberRecordPb deltas = 4;
   repeated LoadReport loads = 5;  // NEW
+  repeated ExpertHeatReport heat      = 6;  // NEW
+  repeated OwnershipDelta   ownership = 7;  // NEW
 }
 
 message PingReq {
@@ -159,6 +163,8 @@ message PingReq {
   string probe_id = 4;
   repeated MemberRecordPb deltas = 5;
   repeated LoadReport loads = 6;  // NEW
+  repeated ExpertHeatReport heat      = 7;  // NEW
+  repeated OwnershipDelta   ownership = 8;  // NEW
 }
 
 message PingReqAck {
@@ -169,6 +175,8 @@ message PingReqAck {
   bool success = 5;
   repeated MemberRecordPb deltas = 6;
   repeated LoadReport loads = 7;  // NEW
+  repeated ExpertHeatReport heat      = 8;  // NEW
+  repeated OwnershipDelta   ownership = 9;  // NEW
 }
 
 message Join {
@@ -218,6 +226,46 @@ message LoadReport {
   int64  ts_unix_ms     = 3;
 }
 
+// ---------------------------------------------------------------------------
+// Phase 5b — expert heat, ownership, and weight-transfer messages.
+// ---------------------------------------------------------------------------
+
+message ExpertHeatEntry {
+  uint32 layer_idx     = 1;
+  uint32 expert_id     = 2;
+  uint32 heat_ema_x100 = 3;
+}
+
+message ExpertHeatReport {
+  string shard_id = 1;
+  repeated ExpertHeatEntry entries = 2;
+  int64  ts_unix_ms = 3;
+}
+
+message OwnershipDelta {
+  string shard_id   = 1;
+  uint32 layer_idx  = 2;
+  uint32 expert_id  = 3;
+  uint32 action     = 4;  // 0 = ADD; 1 = REMOVE (reserved for Phase 6)
+  int64  ts_unix_ms = 5;
+}
+
+message ExpertWeightRequest {
+  uint32 protocol_version = 1;
+  string request_id       = 2;
+  uint32 layer_idx        = 3;
+  uint32 expert_id        = 4;
+}
+
+message ExpertWeightTransfer {
+  uint32 protocol_version = 1;
+  string request_id       = 2;
+  uint32 layer_idx        = 3;
+  uint32 expert_id        = 4;
+  repeated TensorDescriptor tensors = 5;  // exactly 9, fixed order (see spec §3.4)
+  uint32 tensor_count     = 6;
+}
+
 message Envelope {
   oneof payload {
     BeginRequest begin = 1;
@@ -236,5 +284,7 @@ message Envelope {
     MembershipDelta membership_delta = 13;
     ExpertRequest expert_request = 14;
     ExpertResponse expert_response = 15;
+    ExpertWeightRequest  expert_weight_request  = 16;
+    ExpertWeightTransfer expert_weight_transfer = 17;
   }
 }
