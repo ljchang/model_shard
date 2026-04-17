@@ -113,6 +113,7 @@ class Node:
                 for eid in ids:
                     self._ownership_seen.add((sid, layer, eid))
         self._ownership_seen_lock = threading.Lock()
+        self._live_experts_lock = threading.Lock()
 
         # Phase 5b: per-node heat tracker for routing-count EMA.
         self._heat_tracker = HeatTracker()
@@ -204,6 +205,11 @@ class Node:
                 self_shard_id=shard.shard_id,
                 policy=policy,
                 heat_tracker=self._heat_tracker,
+                # live_experts is intentionally a shared-mutable reference; reads
+                # in MigrationScanner._select_candidate are eventually-consistent.
+                # Writes are lock-guarded in Node.migration_attach; CPython GIL
+                # atomicity makes individual set.add / set membership checks safe
+                # even without a scanner-side lock.
                 live_experts=self._live_experts,
                 owner_lookup=self.owners_of,
                 load_provider=self._loads_snapshot,
@@ -806,7 +812,8 @@ class Node:
         attach_expert(
             self._lm, layer_idx, expert_id, tensors, _MLX_COMPUTE_LOCK
         )
-        self._live_experts.setdefault(layer_idx, set()).add(expert_id)
+        with self._live_experts_lock:
+            self._live_experts.setdefault(layer_idx, set()).add(expert_id)
         with self._ownership_seen_lock:
             self._ownership_seen.add((self._shard.shard_id, layer_idx, expert_id))
         if self._membership is not None:
