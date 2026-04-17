@@ -86,4 +86,32 @@ def run_attention_and_route(
     return post_attn, top_k_ids, top_k_weights
 
 
-__all__ = ["group_expert_ids_by_owner", "run_attention_and_route"]
+def run_shared_expert(lm: Any, h: mx.array, layer_idx: int) -> mx.array:
+    """Return the dense-branch output ``h1`` for ``layer_idx``.
+
+    Despite the MoE-literature name, the "shared expert" in Gemma 4 is the
+    per-layer dense MLP (``layer.mlp``, 3x intermediate size) wrapped in its
+    own pre/post feed-forward layernorms. It runs in parallel to the routed
+    sparse experts and its output is summed with the aggregated expert output
+    to form the MoE block's contribution.
+
+    Concretely (matching mlx-vlm ``DecoderLayer.__call__`` lines 74-76 in
+    ``gemma4/language.py`` when ``enable_moe=True``)::
+
+        h1 = post_feedforward_layernorm_1(mlp(pre_feedforward_layernorm(h)))
+
+    Always-local: the dense MLP weights are replicated on every node, so no
+    RPC is needed.
+    """
+    layer = lm.text_model.layers[layer_idx]
+    out: mx.array = layer.post_feedforward_layernorm_1(
+        layer.mlp(layer.pre_feedforward_layernorm(h))
+    )
+    return out
+
+
+__all__ = [
+    "group_expert_ids_by_owner",
+    "run_attention_and_route",
+    "run_shared_expert",
+]
