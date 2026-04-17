@@ -109,17 +109,22 @@ def run_selected_experts(
     of all experts and is applied by ``aggregate_experts`` after the weighted
     sum across experts completes.
 
-    Returned dict maps ``int(eid) -> tensor [B, L, hidden]`` in bfloat16. Keys
-    are exactly ``set(expert_ids)``; empty input yields empty dict.
+    Returned dict maps ``int(eid) -> tensor [B, L, hidden]`` in whatever dtype
+    ``Experts.__call__`` produces (no cast is applied here, to match the
+    atomic path). Keys are exactly ``set(expert_ids)``; empty input yields
+    empty dict.
 
     Strategy (Strategy A in the Phase 3 plan): reuse the existing
     ``layer.experts`` module by passing ``top_k_indices=[[eid]]`` (K=1) and
     ``top_k_weights=[[1.0]]`` per-eid. ``Experts.__call__`` then computes
     ``expert_out * 1.0`` and sums over the singleton K-dim, which is the
-    identity — so the returned tensor is exactly the raw output of expert
-    ``eid`` applied to every token. This keeps us on the library's
-    gather_mm/gather_qmm fast path (transparent over quantization) and avoids
-    re-implementing SwitchGLU's sort/unsort dance.
+    identity — so the returned tensor is the raw output of expert ``eid``
+    applied to every token. This avoids re-implementing SwitchGLU's
+    sort/unsort dance. Note that the atomic K=8 path and this split K=1 path
+    may take different branches inside ``Experts.__call__`` (e.g. Small-K
+    skips the sort path), so numerical equivalence with the atomic path is
+    not claimed here — that property is the subject of the Task 9 split-
+    equivalence proof.
     """
     if not expert_ids:
         return {}
@@ -139,7 +144,7 @@ def run_selected_experts(
         # sum(axis=-2) -> (B*L,H) -> reshape to (B,L,H). With K=1 and w=1.0
         # the multiply+sum is an identity, so we get the raw per-expert output.
         raw = layer.experts(h_normed, indices, ones_weights)
-        out[key] = raw.astype(mx.bfloat16)
+        out[key] = raw
     return out
 
 
