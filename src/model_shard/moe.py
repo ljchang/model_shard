@@ -8,6 +8,7 @@ equivalence test for the correctness proof.
 
 from __future__ import annotations
 
+import random
 from collections.abc import Mapping
 from typing import Any
 
@@ -208,9 +209,61 @@ def aggregate_experts(
     return result
 
 
+def group_expert_ids_by_owner_loaded(
+    top_k_ids: list[int],
+    owners: Mapping[str, set[int]],
+    peer_loads: Mapping[str, int],
+    self_shard_id: str,
+    self_load: int,
+    rng: random.Random,
+) -> dict[str, list[int]]:
+    """Partition top_k_ids by owner using power-of-two-choices on load.
+
+    Each id in top_k_ids is assigned to exactly one of its candidate owners.
+    If only one candidate owns the id, it wins uncontested. With two
+    candidates, both are compared and the lower-loaded wins. With >=3
+    candidates, two are sampled uniformly and the lower-loaded of those wins.
+
+    Loads are keyed by shard_id:
+      * peer_loads[sid] - integer EMA x 100 from most recent gossip.
+      * self_shard_id / self_load - the caller's own measurement.
+      * A candidate with no known load is assigned INT_MAX so any known
+        candidate beats it.
+    """
+    candidates_by_id: dict[int, list[str]] = {}
+    for owner, ids in owners.items():
+        for i in ids:
+            candidates_by_id.setdefault(i, []).append(owner)
+
+    def load_of(sid: str) -> int:
+        if sid == self_shard_id:
+            return self_load
+        if sid in peer_loads:
+            return peer_loads[sid]
+        return 2**31 - 1
+
+    by_owner: dict[str, list[int]] = {}
+    for eid in top_k_ids:
+        candidates = candidates_by_id.get(eid)
+        if not candidates:
+            raise KeyError(f"expert_id {eid} has no owner in {list(owners)}")
+        if len(candidates) == 1:
+            winner = candidates[0]
+        else:
+            pool = (
+                list(candidates)
+                if len(candidates) == 2
+                else rng.sample(candidates, 2)
+            )
+            winner = min(pool, key=load_of)
+        by_owner.setdefault(winner, []).append(eid)
+    return by_owner
+
+
 __all__ = [
     "aggregate_experts",
     "group_expert_ids_by_owner",
+    "group_expert_ids_by_owner_loaded",
     "run_attention_and_route",
     "run_selected_experts",
     "run_shared_expert",
