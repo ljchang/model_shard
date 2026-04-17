@@ -337,6 +337,8 @@ class Node:
             self._handle_activation(env.activation, tensor_bytes, inbound_stream)
         elif which == "sampled_token":
             self._handle_sampled_token(env.sampled_token)
+        elif which == "error":
+            self._handle_upstream_error(env.error)
         elif which == "end":
             self._handle_end(env.end)
         elif which == "expert_request":
@@ -545,6 +547,11 @@ class Node:
                     "inbound activation rejected by provenance on %s: %s",
                     self._shard.shard_id, exc,
                 )
+                # Send the rejection error upstream on the inbound stream
+                # (so the upstream peer knows) AND forward it to the head
+                # via our outbound stream so the head can relay it to the
+                # client. Without the outbound path the client hangs
+                # because the head's decode loop never gets a signal.
                 with contextlib.suppress(OSError):
                     _send_error(
                         inbound_stream,
@@ -552,6 +559,22 @@ class Node:
                         wire_pb2.ERR_INVALID_PROVENANCE,
                         str(exc),
                     )
+                if not self.is_tail:
+                    # Non-tail: just close the outbound so upstream sees a
+                    # broken pipe (the broken-pipe pattern from Phase 2).
+                    self._close_outbound()
+                else:
+                    # Tail: our outbound goes to the head. Send the error
+                    # there so the head can surface it to the client.
+                    with contextlib.suppress(OSError):
+                        with self._out_lock:
+                            stream = self._ensure_out_stream()
+                            _send_error(
+                                stream,
+                                act.request_id,
+                                wire_pb2.ERR_INVALID_PROVENANCE,
+                                str(exc),
+                            )
                 return
 
         with self._state_lock:
@@ -628,6 +651,34 @@ class Node:
             _LOG.warning("SampledToken for unknown request_id %s", tok.request_id)
             return
         state.token_queue.put(int(tok.token_id))
+
+    def _handle_upstream_error(self, err: wire_pb2.Error) -> None:
+        """Handle an Error envelope forwarded from a downstream peer (e.g., the
+        tail rejecting a provenance violation). Only the head does anything
+        useful here: it forwards the error to the waiting client and unblocks
+        the decode loop.
+
+        Non-head nodes that receive an upstream Error (possible in multi-hop
+        error propagation) simply log a warning and drop the message."""
+        if not self.is_head:
+            _LOG.warning(
+                "unexpected upstream Error on non-head shard %s: code=%d detail=%r",
+                self._shard.shard_id, err.code, err.detail,
+            )
+            return
+        with self._state_lock:
+            state = self._head_states.get(err.request_id)
+        if state is None:
+            _LOG.warning("upstream Error for unknown request_id %s", err.request_id)
+            return
+        # Surface the error to the client immediately.
+        with contextlib.suppress(OSError):
+            _send_error(state.client_stream, err.request_id, err.code, err.detail)
+        # Poison the token queue so _drive_decode_loop wakes and terminates.
+        state.token_queue.put(_POISON_TOKEN)
+        with self._state_lock:
+            self._kv_caches.pop(err.request_id, None)
+            self._head_states.pop(err.request_id, None)
 
     def _handle_end(self, req: wire_pb2.EndRequest) -> None:
         with self._state_lock:

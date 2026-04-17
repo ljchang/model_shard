@@ -277,7 +277,7 @@ def validate_chain(
     if tail_tensor_bytes is not None:
         tail = chain[-1]
         if tail.op is None:
-            raise ProvenanceError("tail entry has no op descriptor")
+            raise ProvenanceError("provenance tail entry has no op descriptor")
         expected = compute_hash(
             parent_hashes=tail.parent_hashes,
             node_id=tail.node_id,
@@ -286,7 +286,7 @@ def validate_chain(
         )
         if expected != tail.hash:
             raise ProvenanceError(
-                "tail entry hash mismatch: recomputed digest differs from recorded"
+                "provenance tail entry hash mismatch: recomputed digest differs from recorded"
             )
 
 
