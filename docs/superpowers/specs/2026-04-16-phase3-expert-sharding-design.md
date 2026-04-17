@@ -117,7 +117,7 @@ message ExpertRequest {
   uint32 layer_idx        = 3;
   repeated uint32 expert_ids = 4;
   // tensor post_attn_h carried out-of-band (shape + dtype in oneof header)
-  TensorSpec h_spec       = 5;
+  TensorDescriptor h_spec       = 5;
 }
 
 message ExpertResponse {
@@ -125,7 +125,7 @@ message ExpertResponse {
   string request_id       = 2;
   uint32 layer_idx        = 3;
   repeated uint32 expert_ids = 4;  // same order as request; response tensor is stacked
-  TensorSpec outputs_spec = 5;
+  TensorDescriptor outputs_spec = 5;
 }
 ```
 
