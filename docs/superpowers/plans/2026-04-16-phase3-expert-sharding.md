@@ -663,15 +663,24 @@ Expected: `ImportError: cannot import name 'run_shared_expert'`.
 
 - [ ] **Step 3: Implement `run_shared_expert`**
 
+Per spec §8: the Gemma 4 DecoderLayer has two parallel branches summed as peers. The so-called "shared expert" is actually the dense `self.mlp` (3× intermediate size) wrapped in its own pre/post layernorms. This function returns the completed dense-branch `h1`.
+
 Append to `src/model_shard/moe.py`:
 
 ```python
 def run_shared_expert(lm: Any, h: mx.array, layer_idx: int) -> mx.array:
-    """Run the shared expert for `layer_idx` on `h`. Always-local — weights are
-    replicated on every node."""
+    """Return the dense-branch output `h1` for layer_idx, per spec §8.
+
+    Concretely: h1 = post_feedforward_layernorm_1(mlp(pre_feedforward_layernorm(h))).
+    Always-local — weights are replicated on every node.
+    """
     layer = lm.text_model.layers[layer_idx]
-    return layer.mlp.shared_expert(h)  # attribute name confirmed in Task 1
+    return layer.post_feedforward_layernorm_1(
+        layer.mlp(layer.pre_feedforward_layernorm(h))
+    )
 ```
+
+Verify the exact attribute names against `layer_idx=15` of the loaded model before adopting — read one DecoderLayer in mlx-vlm's `language.py` to confirm `pre_feedforward_layernorm`, `post_feedforward_layernorm_1`, and `mlp` are the right identifiers.
 
 - [ ] **Step 4: Run — expect pass**
 
@@ -733,44 +742,68 @@ Expected: `ImportError`.
 
 - [ ] **Step 3: Implement**
 
-Use the result of Task 1 to pick the right op pattern. The two cases:
+Per spec §8 (resolved), mlx-vlm's MoE is **sparse** — `mlx_lm.models.switch_layers.SwitchGLU` uses `mx.gather_mm` / `mx.gather_qmm` with `rhs_indices=top_k_indices` against a stacked weight tensor `(num_experts, out, in)`. To reproduce bit-exactly while running only a subset of experts per node, we:
 
-**Case A — masked-all in mlx-vlm:** all 128 experts compute in one batched op. To run *only* a subset while preserving bit-equivalence, we still invoke the batched op and select rows by `mx.take`. The output dict maps each selected id to its row.
+1. Apply `pre_feedforward_layernorm_2` to `h` (stateless; weights replicated).
+2. Call a `SwitchGLU`-style gather forward with `indices` restricted to the intersection of `top_k_indices` and `expert_ids` (this node's locally-hosted experts).
+3. Return each selected expert's *pre-weighting, pre-post-norm* output keyed by expert-id. Aggregation (gated sum across top-k slots and `post_feedforward_layernorm_2`) is handled in `aggregate_experts`.
 
 ```python
 def run_selected_experts(
-    lm: Any, h: mx.array, layer_idx: int, expert_ids: list[int]
+    lm: Any,
+    h: mx.array,
+    layer_idx: int,
+    expert_ids: list[int],
 ) -> dict[int, mx.array]:
-    """Run the selected routed experts for `layer_idx` on `h`.
+    """Run a subset of the routed experts for `layer_idx` on `h`.
 
-    Under Case A (mlx-vlm is masked-all) this runs all 128 experts and returns
-    only the requested rows. Case B (sparse) would run a per-id loop instead.
-    Task 1 resolves which case applies.
+    Caller passes the post-attention residual `h` (NOT pre-normed); this
+    function applies `pre_feedforward_layernorm_2` internally to keep the
+    wire payload minimal and avoid relying on caller normalisation.
+
+    Returns {expert_id: per-expert output tensor} with shape [B, L, hidden]
+    each. Per-expert outputs have not yet been multiplied by top-k weights
+    nor passed through post_feedforward_layernorm_2 — aggregate_experts
+    does that.
     """
     if not expert_ids:
         return {}
     layer = lm.text_model.layers[layer_idx]
-    # Masked-all path: batched_experts(h) has shape [B, L, 128, hidden].
-    all_expert_out = layer.mlp.experts(h)  # exact attr confirmed in Task 1
-    return {
-        int(eid): all_expert_out[:, :, eid, :]
-        for eid in expert_ids
-    }
+    h_normed = layer.pre_feedforward_layernorm_2(h)
+
+    # SwitchGLU-style call: stacked expert weights, gather by id.
+    # mlx-vlm's Experts accepts (h, top_k_indices, top_k_weights) but folds
+    # the weighted sum internally, which we don't want here. Call the
+    # underlying stacked GLU directly with batched indices that select
+    # *only* our expert_ids, and with dummy uniform weights so the module's
+    # internal sum is a no-op over the singleton output axis.
+    # The exact API is confirmed by reading mlx-vlm's Experts.__call__ and
+    # SwitchGLU.__call__; adapt if names differ.
+    per_expert: dict[int, mx.array] = {}
+    for eid in expert_ids:
+        per_expert[int(eid)] = _run_one_expert(layer, h_normed, int(eid))
+    return per_expert
+
+
+def _run_one_expert(layer: Any, h_normed: mx.array, eid: int) -> mx.array:
+    """Compute one routed expert's output on the already-pre-normed input.
+    Uses the same stacked weight layout mlx-vlm uses so quantization
+    groups and dtypes match."""
+    # gate/up/down projections live in layer.mlp.experts (SwitchGLU).
+    # Invoke it with a single-expert index to reuse its gather_mm path.
+    exp = layer.mlp.experts
+    idx = mx.array([[eid]])  # shape [1, 1] — one token, one expert slot
+    weight = mx.array([[1.0]])  # dummy weight, output pre-weight anyway
+    # The SwitchGLU forward returns weighted sum across the slot axis;
+    # with one slot and weight=1, it's equivalent to the unweighted expert
+    # output on h_normed broadcast across B,L. Validate shapes before use.
+    B, L = h_normed.shape[:-1]
+    h_flat = h_normed.reshape(B * L, -1)[:, None, :]          # [B*L, 1, hidden]
+    out_flat = exp(h_flat, idx.repeat(B * L, axis=0), weight.repeat(B * L, axis=0))
+    return out_flat.reshape(B, L, -1)
 ```
 
-**Case B — sparse in mlx-vlm:** per-id call.
-
-```python
-def run_selected_experts(
-    lm: Any, h: mx.array, layer_idx: int, expert_ids: list[int]
-) -> dict[int, mx.array]:
-    if not expert_ids:
-        return {}
-    experts = lm.text_model.layers[layer_idx].mlp.experts  # list-like
-    return {int(eid): experts[int(eid)](h) for eid in expert_ids}
-```
-
-Pick the one matching Task 1's finding. Commit only one branch.
+**Note:** the exact SwitchGLU API (whether it takes flat/unflattened tensors, how it broadcasts, whether `weights` can truly be 1.0 without triggering a fused path) must be verified by reading `mlx_lm/models/switch_layers.py` before committing. If the one-expert-at-a-time call is awkward, an alternative is to pass the full intersection list as a single gather call and decode the returned tensor back into the dict — choose whichever matches mlx-vlm's numerics exactly. The split-equivalence test (Task 9) is the final arbiter.
 
 - [ ] **Step 4: Run — expect pass**
 
@@ -792,6 +825,8 @@ git commit -m "Phase 3: moe.run_selected_experts — run a subset of routed expe
 - Modify: `src/model_shard/moe.py`
 - Create: `tests/test_moe_aggregate.py`
 
+Per spec §8 (resolved): aggregate_experts must reproduce mlx-vlm's two-branch sum — the routed-experts branch is `post_feedforward_layernorm_2(Σ_j w[j] * expert_outputs[top_k_ids[j]])` in top-k *slot order* (not id-sorted), and the result is added to the pre-computed dense-branch `shared_out`. Slot order matters because each `w[j]` is paired to `top_k_ids[j]` — sorting by id would reassign weights to the wrong experts.
+
 - [ ] **Step 1: Write the failing test**
 
 Create `tests/test_moe_aggregate.py`:
@@ -805,40 +840,41 @@ import pytest
 from model_shard.moe import aggregate_experts
 
 
-def test_aggregate_permutation_invariant() -> None:
-    """Different input orderings of outputs and top_k_ids (with matching
-    weights) must produce identical results — that's why we sort by id."""
-    hidden = 4
-    out_a = mx.array([[[1.0, 0.0, 0.0, 0.0]]])
-    out_b = mx.array([[[0.0, 1.0, 0.0, 0.0]]])
-    out_c = mx.array([[[0.0, 0.0, 1.0, 0.0]]])
-    shared = mx.array([[[0.0, 0.0, 0.0, 1.0]]])
+def test_aggregate_pairs_weight_to_slot_not_id() -> None:
+    """aggregate_experts must pair top_k_weights[..., j] with
+    expert_outputs[top_k_ids[j]] (slot order), matching mlx-vlm.
+    Permuting ids without permuting weights produces a different result."""
+    out_3 = mx.array([[[1.0, 0.0]]])
+    out_7 = mx.array([[[0.0, 1.0]]])
+    shared = mx.array([[[0.0, 0.0]]])
 
-    # Two orderings of the same (id, weight, output) triples.
-    ids_1 = [7, 3, 11]
-    weights_1 = mx.array([[[0.2, 0.5, 0.3]]])
-    outs_1 = {7: out_a, 3: out_b, 11: out_c}
+    # Slot 0 carries weight 0.9, slot 1 carries weight 0.1.
+    weights = mx.array([[[0.9, 0.1]]])
 
-    ids_2 = [11, 7, 3]
-    weights_2 = mx.array([[[0.3, 0.2, 0.5]]])
-    outs_2 = {11: out_c, 7: out_a, 3: out_b}
-
-    r1 = aggregate_experts(outs_1, ids_1, weights_1, shared)
-    r2 = aggregate_experts(outs_2, ids_2, weights_2, shared)
-    mx.eval(r1, r2)
-    assert mx.all(r1 == r2).item()
+    # Order A: slot 0 → id 3, slot 1 → id 7 → 0.9*out_3 + 0.1*out_7 = [0.9, 0.1]
+    r_a = aggregate_experts({3: out_3, 7: out_7}, [3, 7], weights, shared)
+    # Order B: slot 0 → id 7, slot 1 → id 3 → 0.9*out_7 + 0.1*out_3 = [0.1, 0.9]
+    r_b = aggregate_experts({3: out_3, 7: out_7}, [7, 3], weights, shared)
+    mx.eval(r_a, r_b)
+    # Different results: weight pairing follows slot, not id.
+    assert not mx.all(r_a == r_b).item()
 
 
-def test_aggregate_includes_shared_once() -> None:
-    hidden = 2
+def test_aggregate_adds_shared_branch_unchanged() -> None:
+    """The shared (dense-branch) output is added after the gated sum with
+    NO layernorm applied to it here — the caller (run_shared_expert) has
+    already applied post_feedforward_layernorm_1. aggregate_experts applies
+    post_feedforward_layernorm_2 only to the routed sum, then adds shared."""
     shared = mx.array([[[10.0, 20.0]]])
     out = mx.array([[[1.0, 2.0]]])
-    ids = [4]
-    weights = mx.array([[[1.0]]])
-    r = aggregate_experts({4: out}, ids, weights, shared)
+    r = aggregate_experts({4: out}, [4], mx.array([[[1.0]]]), shared)
     mx.eval(r)
-    expected = mx.array([[[11.0, 22.0]]])
-    assert mx.all(r == expected).item()
+    # routed branch = post_ffn_ln_2(1.0 * out). Without knowing the LN
+    # weights we can't predict the routed term exactly, so assert instead
+    # that the residual connection with shared is linear:
+    r2 = aggregate_experts({4: out}, [4], mx.array([[[1.0]]]), shared + 5.0)
+    mx.eval(r2)
+    assert mx.all(r2 - r == mx.array([[[5.0, 5.0]]])).item()
 
 
 def test_aggregate_missing_id_raises() -> None:
@@ -848,6 +884,8 @@ def test_aggregate_missing_id_raises() -> None:
         )
 ```
 
+Note: unlike the prior (stale) test, this suite does NOT claim permutation invariance — the new op sequence is explicitly order-dependent via the slot→weight pairing.
+
 - [ ] **Step 2: Run — expect failure**
 
 Run: `uv run pytest tests/test_moe_aggregate.py -v`
@@ -855,7 +893,7 @@ Expected: `ImportError`.
 
 - [ ] **Step 3: Implement**
 
-Append to `src/model_shard/moe.py`:
+`aggregate_experts` needs access to the layer's `post_feedforward_layernorm_2` module. Take it as an explicit argument to keep the function pure (no `lm`/layer_idx lookup inside):
 
 ```python
 def aggregate_experts(
@@ -863,25 +901,40 @@ def aggregate_experts(
     top_k_ids: list[int],
     top_k_weights: mx.array,
     shared_out: mx.array,
+    post_ffn_ln_2: Any,
 ) -> mx.array:
-    """Deterministic gated sum of expert outputs + shared expert.
+    """Two-branch sum matching mlx-vlm's DecoderLayer (spec §8):
 
-    Sorts by expert-id before summing so the result is invariant to the order
-    outputs arrive in over the network. Op order matches mlx-vlm's internal
-    MoE aggregation (confirmed in Task 1).
+        routed = post_ffn_ln_2(Σ_j w[j] * expert_outputs[top_k_ids[j]])
+        return shared_out + routed
+
+    Iterates top-k in *slot order* (j = 0..k-1) — weights pair to slots,
+    not to expert ids. `shared_out` is the pre-computed dense-branch
+    h1 = post_feedforward_layernorm_1(mlp(pre_feedforward_layernorm(h))),
+    passed in unchanged.
     """
-    # top_k_weights has shape [B, L, k]; weights[:,:,j] pairs with top_k_ids[j].
-    pairs = sorted(enumerate(top_k_ids), key=lambda iv: iv[1])
-
+    # top_k_weights has shape [B, L, k]; weights[..., j:j+1] pairs with top_k_ids[j].
     acc: mx.array | None = None
-    for j, eid in pairs:
+    for j, eid in enumerate(top_k_ids):
         if eid not in expert_outputs:
             raise KeyError(f"expert {eid} output missing from aggregate_experts")
         contrib = top_k_weights[..., j : j + 1] * expert_outputs[eid]
         acc = contrib if acc is None else acc + contrib
 
     assert acc is not None, "top_k_ids must be non-empty"
-    return acc + shared_out
+    return shared_out + post_ffn_ln_2(acc)
+```
+
+The call site (`ExpertOrchestrator.run_split_layer`) provides `post_ffn_ln_2 = lm.text_model.layers[layer_idx].post_feedforward_layernorm_2`. Adjust the test above to pass a simple identity module (or a LayerNorm fixture) via `post_ffn_ln_2=lambda x: x` so the test isolates aggregation logic from LN numerics.
+
+Update the test to match:
+
+```python
+# At top of test file:
+def _identity(x: mx.array) -> mx.array:
+    return x
+
+# In every aggregate_experts call in the tests, pass post_ffn_ln_2=_identity.
 ```
 
 - [ ] **Step 4: Run — expect pass**
@@ -974,6 +1027,7 @@ def test_layer15_split_equivalent_to_atomic(loaded_model) -> None:
     all_ids = sorted({int(eid) for eid in top_k_ids.reshape(-1).tolist()})
     expert_outputs = run_selected_experts(lm, post_attn, layer_idx, all_ids)
     shared_out = run_shared_expert(lm, post_attn, layer_idx)
+    post_ffn_ln_2 = tm.layers[layer_idx].post_feedforward_layernorm_2
 
     # aggregate_experts operates per-position; here top_k_ids is [B, L, k],
     # so we loop positions to honor per-token top-k. In production the
@@ -986,7 +1040,9 @@ def test_layer15_split_equivalent_to_atomic(loaded_model) -> None:
             weights = top_k_weights[b : b + 1, l : l + 1, :]
             per_pos_outs = {eid: expert_outputs[eid][b : b + 1, l : l + 1, :] for eid in ids}
             per_pos_shared = shared_out[b : b + 1, l : l + 1, :]
-            agg = aggregate_experts(per_pos_outs, ids, weights, per_pos_shared)
+            agg = aggregate_experts(
+                per_pos_outs, ids, weights, per_pos_shared, post_ffn_ln_2
+            )
             out_split = mx.concatenate(
                 [out_split[:, :l, :], agg, out_split[:, l + 1 :, :]], axis=1
             ) if out_split.shape[1] > 1 else agg
@@ -1159,6 +1215,7 @@ class ExpertOrchestrator:
             outputs.update(peer_outputs)
 
         # Aggregate per position; same shape pattern as Task 9's proof.
+        post_ffn_ln_2 = lm.text_model.layers[layer_idx].post_feedforward_layernorm_2
         out = mx.zeros_like(post_attn)
         for b in range(top_k_ids.shape[0]):
             for l in range(top_k_ids.shape[1]):
@@ -1168,7 +1225,9 @@ class ExpertOrchestrator:
                 }
                 weights = top_k_weights[b : b + 1, l : l + 1, :]
                 per_pos_shared = shared_out[b : b + 1, l : l + 1, :]
-                agg = aggregate_experts(per_pos, ids, weights, per_pos_shared)
+                agg = aggregate_experts(
+                    per_pos, ids, weights, per_pos_shared, post_ffn_ln_2
+                )
                 out = out.at[:, l : l + 1, :].add(agg)  # or concat-splice if `at` unavailable
         return out
 

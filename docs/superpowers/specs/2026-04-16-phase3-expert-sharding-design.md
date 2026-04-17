@@ -13,7 +13,7 @@ Gemma 4 26B A4B has 30 transformer layers, each with a MoE block: 1 shared exper
 - **D2 Expert placement.** Round-robin by id: node `i` of 3 nodes owns experts `{e | e % 3 == i}`. Hardcoded for layer 15; replaces a gossiped shard map in Phase 4+.
 - **D3 Shared expert.** Replicated on all 3 nodes (weights already loaded because nodes load the full model). Aggregation always runs locally, no fan-out.
 - **D4 Aggregation site.** The node that owns the attention block for a given layer also owns the router and the aggregator. For layer 15 that is the mid node (layers 10-20 territory).
-- **D5 Correctness bar.** Strict Tier 1 reproduction — tokens emitted by the distributed pipeline must match the Phase 1 reference byte-for-byte. Achieved by sorting expert outputs by expert-id before the gated sum, mirroring mlx-vlm's internal MoE op order.
+- **D5 Correctness bar.** Strict Tier 1 reproduction — tokens emitted by the distributed pipeline must match the Phase 1 reference byte-for-byte. Achieved by reproducing mlx-vlm's two-branch MoE op order exactly (see §8): pair each top-k weight with its slot's expert output (top-k slot order, not id-sorted), sum across the top-k axis, apply `post_feedforward_layernorm_2`, then add the separately-computed dense branch `h1 = post_feedforward_layernorm_1(mlp(pre_feedforward_layernorm(h)))`.
 - **D6 Failure semantics.** Hard-fail, consistent with Phase 2. If an `ExpertRequest` RPC fails (TCP broken, timeout, observer fires on peer leaving ALIVE), the aggregator emits `Error{SHARD_UNAVAILABLE, is_final=true}` to the client. No retry, no 7/8 degradation.
 - **D7 Transport.** Reuse Phase 1's length-prefixed TCP framing and protobuf `Envelope` oneof. Add two new oneof cases (`ExpertRequest`, `ExpertResponse`). No new transport.
 
@@ -47,9 +47,9 @@ Pure functions, no network. Mirrors mlx-vlm's MoE op order exactly.
 | Function | Signature | Purpose |
 |---|---|---|
 | `run_attention_and_route` | `(lm, h, layer_idx, cache, masks) -> (post_attn_h, top_k_ids, top_k_weights)` | Pre-expert half of a single layer. |
-| `run_shared_expert` | `(lm, h, layer_idx) -> mx.array` | Always-local path. |
-| `run_selected_experts` | `(lm, h, layer_idx, expert_ids: list[int]) -> dict[int, mx.array]` | Runs only experts hosted on this node. |
-| `aggregate_experts` | `(expert_outputs: dict[int, mx.array], top_k_ids: list[int], top_k_weights: mx.array, shared_out: mx.array) -> mx.array` | Deterministic sum: sort by expert-id, gated sum, add shared. Bit-exact to the atomic layer call. |
+| `run_shared_expert` | `(lm, h, layer_idx) -> mx.array` | Always-local: returns the dense-branch output `h1 = post_feedforward_layernorm_1(mlp(pre_feedforward_layernorm(h)))`. Despite the name, this is `layer.mlp` (3× intermediate), not a separate shared-expert module — see §8. |
+| `run_selected_experts` | `(lm, h, layer_idx, expert_ids: list[int]) -> dict[int, mx.array]` | Runs only experts hosted on this node. Returns per-expert `SwitchGLU`-style outputs before weight-application and before `post_feedforward_layernorm_2` — the weight pairing and post-norm happen in `aggregate_experts`. |
+| `aggregate_experts` | `(expert_outputs: dict[int, mx.array], top_k_ids: list[int], top_k_weights: mx.array, shared_out: mx.array) -> mx.array` | `shared_out + post_feedforward_layernorm_2(Σ_j top_k_weights[...,j,:] * expert_outputs[top_k_ids[j]])`. Slot-order iteration (`j` from 0 to k-1), not id-sorted. Bit-exact to the atomic layer call when the op sequence matches mlx-vlm §8. |
 
 ### 3.2 `src/model_shard/mlx_engine.py` modification
 
@@ -140,8 +140,8 @@ Tensor payload uses the existing out-of-band length-prefixed frame. `ExpertRespo
 3. Mid runs attention + router locally, producing `post_attn_h`, `top_k_ids` (8), `top_k_weights`.
 4. Partition by owner: e.g. `{head: [3,6], mid: [4,7], tail: [2,5,8]}` (three of the top-8 may coincide on one node; batch them).
 5. Mid sends one `ExpertRequest` to head (for its 2 experts), one to tail (for its 3). Runs its own 2 experts in parallel on the MLX device.
-6. Mid runs shared expert locally.
-7. Mid gathers outputs. Sorts by expert-id. Computes `sum(w[i] * out[sorted_ids[i]] for i in 0..7) + shared_out`. This order must match mlx-vlm's `MoEBlock` op order bit-for-bit (§6 split-equivalence test is the proof).
+6. Mid runs the dense-branch (so-called "shared expert") path locally: `h1 = post_feedforward_layernorm_1(mlp(pre_feedforward_layernorm(post_attn_h)))`.
+7. Mid gathers per-expert outputs. Iterates top-k in slot order (j = 0..7), multiplies `expert_outputs[top_k_ids[j]]` by `top_k_weights[..., j:j+1]`, sums across j, applies `post_feedforward_layernorm_2`, adds `h1`. This order must match mlx-vlm's `DecoderLayer` op order bit-for-bit (§6 split-equivalence test is the proof).
 8. Result continues to layer 16 atomically.
 
 ### 5.1 Concurrency
