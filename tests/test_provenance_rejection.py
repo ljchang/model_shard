@@ -10,7 +10,6 @@ import random
 import socket as _sk
 import threading
 import time
-from pathlib import Path
 
 import pytest
 
@@ -91,7 +90,8 @@ def test_corrupted_chain_gets_rejected(monkeypatch):
     mid_node._forward_activation = corrupting_forward
 
     threads = [threading.Thread(target=n.serve_forever, daemon=True) for n in nodes]
-    for t in threads: t.start()
+    for t in threads:
+        t.start()
     time.sleep(3.0)
 
     head_spec = next(s for s in specs if s.start_layer == 0)
@@ -119,6 +119,6 @@ def test_corrupted_chain_gets_rejected(monkeypatch):
         for e in errors
     ), f"errors did not mention provenance: {errors}"
 
-    for n, th in zip(nodes, threads):
+    for n, th in zip(nodes, threads, strict=False):
         n.shutdown()
         th.join(timeout=3.0)

@@ -103,6 +103,43 @@ Phase 6 decomposes into three independent sub-projects: 6-A (retry, this), 6-B
 (provenance verification), and 6-C (eviction + REMOVE OwnershipDelta). See
 `docs/superpowers/specs/2026-04-17-phase6a-expert-retry-design.md`.
 
+## Phase 6-B status: Provenance Verification — complete
+
+Every forward pass now carries a hash-chained DAG of `ProvenanceEntry` records that
+mirrors Gemma's computation graph. Each entry is a BLAKE2b-256 digest over
+`(parents || node_id || op_descriptor || output_bytes)`. In the canonical 3-node ×
+1-split-layer × top-8 config this produces 40 entries per forward pass: one per pipeline
+hop, one per expert invocation, and one final aggregation entry. Every node validates
+inbound chains at receive-time and rejects any entry whose hash does not match the
+declared parents; an invalid chain returns `Error{ERR_INVALID_PROVENANCE}` to the
+client immediately.
+
+The goal is topology and authorization enforcement — reject any path that doesn't
+match the model's true computation graph — not Byzantine-insider detection. Phase 5b's
+`owners_of` is the authorization oracle: a node is only a valid parent for a given
+(layer, expert) pair if it appears in `owners_of(L, E)`. Phase 6-A's retries validate
+naturally because the retry target is always drawn from `owners_of(L, E)`, so the
+chain stays structurally correct across retry hops.
+
+Gate: `ENABLE_PROVENANCE=true` (default off).
+
+Correctness proofs: `tests/test_provenance_tier1.py` asserts bit-exact Tier 1 token
+output against the Phase 1 reference with provenance enabled, proving provenance is
+pure bookkeeping with zero compute effect. `tests/test_provenance_determinism.py`
+confirms that identical inputs produce identical hashes. `tests/test_provenance_rejection.py`
+corrupts one byte of a chain entry and verifies the next hop rejects with
+`ERR_INVALID_PROVENANCE` and the client receives the error cleanly with no hang.
+
+A gap filled during Task 10: the tail-to-head-to-client error-propagation path for
+mid-pipeline rejections was absent. Task 10 added `_handle_upstream_error` on the
+head node to forward errors to the client and poison the decode queue; this is a
+broader improvement beyond provenance that previously would have caused mid-pipeline
+errors to hang the decode loop silently.
+
+Non-goals: cryptographic signatures, hash re-verification by sample re-run (Phase
+6-B.4 follow-up), KV-cache integrity, cross-token chain linking. See
+`docs/superpowers/specs/2026-04-17-phase6b-provenance-verification-design.md`.
+
 ## Phase 4 status: Load-Aware Routing — complete
 
 Nodes now gossip a compact queue-depth EMA to each other via `LoadReport` piggybacked

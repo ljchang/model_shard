@@ -566,15 +566,14 @@ class Node:
                 else:
                     # Tail: our outbound goes to the head. Send the error
                     # there so the head can surface it to the client.
-                    with contextlib.suppress(OSError):
-                        with self._out_lock:
-                            stream = self._ensure_out_stream()
-                            _send_error(
-                                stream,
-                                act.request_id,
-                                wire_pb2.ERR_INVALID_PROVENANCE,
-                                str(exc),
-                            )
+                    with contextlib.suppress(OSError), self._out_lock:
+                        stream = self._ensure_out_stream()
+                        _send_error(
+                            stream,
+                            act.request_id,
+                            wire_pb2.ERR_INVALID_PROVENANCE,
+                            str(exc),
+                        )
                 return
 
         with self._state_lock:
