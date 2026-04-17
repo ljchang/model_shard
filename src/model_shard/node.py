@@ -481,7 +481,7 @@ class Node:
                 # refs cross threads).
                 mx.eval(stacked)
                 raw = tensor_to_bytes(stacked)
-        except Exception as exc:  # noqa: BLE001 — intentional catch-all
+        except Exception as exc:
             _LOG.exception("expert fan-out raised")
             _send_error(
                 inbound_stream,

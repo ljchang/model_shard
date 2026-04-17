@@ -18,6 +18,7 @@ import random
 import socket
 import threading
 import time
+from typing import Any, BinaryIO, cast
 
 import mlx.core as mx
 import pytest
@@ -81,7 +82,9 @@ def _build_expert_request(
     return env, raw
 
 
-def _solo_node(loaded_model, port: int, moe_experts: dict[int, tuple[int, ...]]) -> Node:
+def _solo_node(
+    loaded_model: Any, port: int, moe_experts: dict[int, tuple[int, ...]]
+) -> Node:
     """Build a two-shard ShardMap where ``solo`` hosts all layers and a
     throw-away ``dummy`` ShardSpec serves only to satisfy
     ``_resolve_downstream`` (a solo shard is both head and tail, so it would
@@ -115,7 +118,7 @@ def _solo_node(loaded_model, port: int, moe_experts: dict[int, tuple[int, ...]])
 
 @pytest.mark.slow
 def test_node_expert_request_handler_returns_valid_response(
-    loaded_model, monkeypatch
+    loaded_model: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Gossip would try UDP membership against the dummy peer; bypass for this
     # narrow handler-focused test.
@@ -136,9 +139,9 @@ def test_node_expert_request_handler_returns_valid_response(
             mx.eval(h)
             env, raw = _build_expert_request("r1", 15, [3, 6, 9], h)
             stream = s.makefile("rwb")
-            send_envelope(stream, env, raw)
+            send_envelope(cast(BinaryIO, stream), env, raw)
             stream.flush()
-            resp_env, resp_tensor = recv_envelope(stream)
+            resp_env, resp_tensor = recv_envelope(cast(BinaryIO, stream))
         finally:
             s.close()
 
@@ -161,7 +164,7 @@ def test_node_expert_request_handler_returns_valid_response(
 
 @pytest.mark.slow
 def test_node_expert_request_wrong_shard_returns_error(
-    loaded_model, monkeypatch
+    loaded_model: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Requesting an expert id this shard does not host -> Error{ERR_WRONG_SHARD}."""
     monkeypatch.setenv("ENABLE_GOSSIP", "false")
@@ -181,9 +184,9 @@ def test_node_expert_request_wrong_shard_returns_error(
             mx.eval(h)
             env, raw = _build_expert_request("r2", 15, [3, 6, 99], h)
             stream = s.makefile("rwb")
-            send_envelope(stream, env, raw)
+            send_envelope(cast(BinaryIO, stream), env, raw)
             stream.flush()
-            resp_env, _ = recv_envelope(stream)
+            resp_env, _ = recv_envelope(cast(BinaryIO, stream))
         finally:
             s.close()
 
@@ -201,7 +204,7 @@ def test_node_expert_request_wrong_shard_returns_error(
 
 @pytest.mark.slow
 def test_expert_request_handler_replies_error_on_compute_failure(
-    loaded_model, monkeypatch
+    loaded_model: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """If ``run_selected_experts`` raises, the handler must reply with
     ``Error{ERR_SHARD_UNAVAILABLE}`` (with exception detail) rather than
@@ -210,7 +213,7 @@ def test_expert_request_handler_replies_error_on_compute_failure(
     """
     monkeypatch.setenv("ENABLE_GOSSIP", "false")
 
-    def _boom(*args, **kwargs):
+    def _boom(*args: Any, **kwargs: Any) -> Any:
         raise RuntimeError("boom")
 
     # ``_handle_expert_request`` imports ``run_selected_experts`` lazily from
@@ -234,9 +237,9 @@ def test_expert_request_handler_replies_error_on_compute_failure(
             mx.eval(h)
             env, raw = _build_expert_request("r3", 15, [3, 6, 9], h)
             stream = s.makefile("rwb")
-            send_envelope(stream, env, raw)
+            send_envelope(cast(BinaryIO, stream), env, raw)
             stream.flush()
-            resp_env, _ = recv_envelope(stream)
+            resp_env, _ = recv_envelope(cast(BinaryIO, stream))
         finally:
             s.close()
 
@@ -255,7 +258,7 @@ def test_expert_request_handler_replies_error_on_compute_failure(
 
 @pytest.mark.slow
 def test_expert_request_handler_rejects_byte_count_mismatch(
-    loaded_model, monkeypatch
+    loaded_model: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """h_spec.byte_count must match the out-of-band tensor payload length.
     Mismatch -> Error{ERR_INTERNAL}.
@@ -279,9 +282,9 @@ def test_expert_request_handler_rejects_byte_count_mismatch(
             # declare one more byte. Handler must catch this.
             env.expert_request.h_spec.byte_count = len(raw) + 1
             stream = s.makefile("rwb")
-            send_envelope(stream, env, raw)
+            send_envelope(cast(BinaryIO, stream), env, raw)
             stream.flush()
-            resp_env, _ = recv_envelope(stream)
+            resp_env, _ = recv_envelope(cast(BinaryIO, stream))
         finally:
             s.close()
 
@@ -300,7 +303,7 @@ def test_expert_request_handler_rejects_byte_count_mismatch(
 
 @pytest.mark.slow
 def test_expert_request_handler_rejects_empty_expert_ids(
-    loaded_model, monkeypatch
+    loaded_model: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Empty expert_ids is malformed (nothing to stack) -> Error{ERR_INTERNAL}."""
     monkeypatch.setenv("ENABLE_GOSSIP", "false")
@@ -320,9 +323,9 @@ def test_expert_request_handler_rejects_empty_expert_ids(
             # Empty expert_ids list.
             env, raw = _build_expert_request("r5", 15, [], h)
             stream = s.makefile("rwb")
-            send_envelope(stream, env, raw)
+            send_envelope(cast(BinaryIO, stream), env, raw)
             stream.flush()
-            resp_env, _ = recv_envelope(stream)
+            resp_env, _ = recv_envelope(cast(BinaryIO, stream))
         finally:
             s.close()
 

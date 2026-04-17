@@ -13,6 +13,8 @@ If (a) != (b), Phase 3 cannot reproduce Tier 1. Fix before proceeding.
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import mlx.core as mx
 import pytest
 
@@ -26,7 +28,7 @@ from model_shard.moe import (
 
 
 @pytest.mark.slow
-def test_layer15_split_equivalent_to_atomic(loaded_model) -> None:  # type: ignore[no-untyped-def]
+def test_layer15_split_equivalent_to_atomic(loaded_model: Any) -> None:
     lm = loaded_model
     layer_idx = 15
     tokens = mx.array([[1, 42, 99, 7, 13, 256, 500]])  # B=1, L=7
@@ -61,7 +63,9 @@ def test_layer15_split_equivalent_to_atomic(loaded_model) -> None:  # type: igno
         lm, h_split, layer_idx, cache_split, (gm2, sm2)
     )
     mx.eval(top_k_ids)
-    all_ids = sorted({int(eid) for eid in top_k_ids.reshape(-1).tolist()})
+    all_ids = sorted(
+        {int(eid) for eid in cast(list[int], top_k_ids.reshape(-1).tolist())}
+    )
     expert_outputs = run_selected_experts(lm, post_attn, layer_idx, all_ids)
     shared_out = run_shared_expert(lm, post_attn, layer_idx)
     post_ffn_ln_2 = tm.layers[layer_idx].post_feedforward_layernorm_2
@@ -70,7 +74,7 @@ def test_layer15_split_equivalent_to_atomic(loaded_model) -> None:  # type: igno
     h1_plus_h2 = mx.zeros_like(post_attn)
     for b in range(top_k_ids.shape[0]):
         for ll in range(top_k_ids.shape[1]):
-            ids = [int(x) for x in top_k_ids[b, ll].tolist()]
+            ids = [int(x) for x in cast(list[int], top_k_ids[b, ll].tolist())]
             weights = top_k_weights[b : b + 1, ll : ll + 1, :]
             per_pos_outs = {
                 eid: expert_outputs[eid][b : b + 1, ll : ll + 1, :] for eid in ids

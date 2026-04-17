@@ -10,6 +10,8 @@ that same baseline.
 
 from __future__ import annotations
 
+from typing import Any
+
 import mlx.core as mx
 import pytest
 
@@ -31,7 +33,9 @@ class _NoRpc(PeerRPC):
         raise AssertionError("should not be called when all experts are local")
 
 
-def _replay_through(lm, tokens, layer_idx):  # type: ignore[no-untyped-def]
+def _replay_through(
+    lm: Any, tokens: mx.array, layer_idx: int
+) -> tuple[mx.array, Any, tuple[Any, Any]]:
     """Embed + run layers [0, layer_idx) on a fresh cache. Returns (h, cache, masks)."""
     h = embed_tokens(lm, tokens)
     cache = make_cache(lm)
@@ -46,7 +50,7 @@ def _replay_through(lm, tokens, layer_idx):  # type: ignore[no-untyped-def]
 
 
 @pytest.mark.slow
-def test_orchestrator_all_local_matches_atomic(loaded_model) -> None:  # type: ignore[no-untyped-def]
+def test_orchestrator_all_local_matches_atomic(loaded_model: Any) -> None:
     lm = loaded_model
     layer_idx = 15
     tokens = mx.array([[1, 42, 99]])

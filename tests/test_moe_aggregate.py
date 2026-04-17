@@ -25,7 +25,7 @@ def test_aggregate_pairs_weight_to_slot_not_id() -> None:
     r_a = aggregate_experts({3: out_3, 7: out_7}, [3, 7], weights, shared, _identity)
     r_b = aggregate_experts({3: out_3, 7: out_7}, [7, 3], weights, shared, _identity)
     mx.eval(r_a, r_b)
-    assert not mx.all(r_a == r_b).item(), (
+    assert not mx.array_equal(r_a, r_b).item(), (
         "Different id orderings with the same weights should produce "
         "different results — weight pairing follows slot, not id."
     )
@@ -42,7 +42,7 @@ def test_aggregate_shared_branch_is_added_linearly() -> None:
         {4: out}, [4], mx.array([[[1.0]]]), shared + 5.0, _identity
     )
     mx.eval(r, r_shifted)
-    assert mx.all(r_shifted - r == mx.array([[[5.0, 5.0]]])).item()
+    assert mx.array_equal(r_shifted - r, mx.array([[[5.0, 5.0]]])).item()
 
 
 def test_aggregate_missing_id_raises() -> None:
@@ -65,4 +65,4 @@ def test_aggregate_applies_post_ffn_ln_2_to_routed_only() -> None:
     r = aggregate_experts({4: out}, [4], mx.array([[[1.0]]]), shared, scale_2x)
     mx.eval(r)
     expected = mx.array([[[7.0, 7.0]]])
-    assert mx.all(r == expected).item()
+    assert mx.array_equal(r, expected).item()

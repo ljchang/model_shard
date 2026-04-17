@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import socket
 import threading
+from typing import BinaryIO, cast
 
 import mlx.core as mx
 
@@ -40,14 +41,14 @@ def _start_fake_peer(expert_ids: list[int]) -> int:
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.bind(("127.0.0.1", 0))
     server.listen(1)
-    port = server.getsockname()[1]
+    port = int(server.getsockname()[1])
 
     def _run() -> None:
         try:
             conn, _ = server.accept()
             try:
                 stream = conn.makefile("rwb")
-                env, tensor = recv_envelope(stream)
+                env, tensor = recv_envelope(cast(BinaryIO, stream))
                 assert env.WhichOneof("payload") == "expert_request"
                 req = env.expert_request
                 h = bytes_to_tensor(
@@ -69,7 +70,7 @@ def _start_fake_peer(expert_ids: list[int]) -> int:
                 resp.expert_response.outputs_spec.dtype = _dtype_to_wire(stacked.dtype)
                 resp.expert_response.outputs_spec.quant = wire_pb2.QUANT_NONE
                 resp.expert_response.outputs_spec.byte_count = len(raw)
-                send_envelope(stream, resp, raw)
+                send_envelope(cast(BinaryIO, stream), resp, raw)
                 stream.flush()
             finally:
                 conn.close()

@@ -21,7 +21,7 @@ import time
 from collections.abc import Iterator, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, BinaryIO, Protocol, cast
 
 import mlx.core as mx
 
@@ -111,10 +111,10 @@ class TcpPeerRPC:
             req.expert_request.h_spec.dtype = _dtype_to_wire(h.dtype)
             req.expert_request.h_spec.quant = wire_pb2.QUANT_NONE
             req.expert_request.h_spec.byte_count = len(raw)
-            send_envelope(stream, req, raw)
+            send_envelope(cast(BinaryIO, stream), req, raw)
             stream.flush()
 
-            env, tensor = recv_envelope(stream)
+            env, tensor = recv_envelope(cast(BinaryIO, stream))
             if env.WhichOneof("payload") == "error":
                 raise RuntimeError(
                     f"peer {peer_shard_id} returned error "
@@ -272,16 +272,15 @@ class ExpertOrchestrator:
             if not remaining:
                 break
 
-            if deadline is not None:
-                if time.monotonic() >= deadline:
-                    # Any peer that didn't finish is responsible for the
-                    # timeout; surface the first as the failure peer.
-                    stuck_peer = next(iter(remaining))
-                    self._cancel_all(remaining.values())
-                    raise ExpertRpcFailure(
-                        f"expert RPC to peer {stuck_peer!r} failed for layer "
-                        f"{layer_idx}: timeout after {self.rpc_timeout_s}s"
-                    )
+            if deadline is not None and time.monotonic() >= deadline:
+                # Any peer that didn't finish is responsible for the
+                # timeout; surface the first as the failure peer.
+                stuck_peer = next(iter(remaining))
+                self._cancel_all(remaining.values())
+                raise ExpertRpcFailure(
+                    f"expert RPC to peer {stuck_peer!r} failed for layer "
+                    f"{layer_idx}: timeout after {self.rpc_timeout_s}s"
+                )
 
             # Wait up to ``poll_s`` on ANY abort event rather than sleeping
             # blindly: this keeps the loop responsive without spinning.
