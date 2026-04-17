@@ -150,6 +150,6 @@ def test_mid_decode_peer_death_unblocks_head(
     )
 
     # Clean up the remaining nodes.
-    for n, th in zip(nodes[:2], threads[:2]):
+    for n, th in zip(nodes[:2], threads[:2], strict=True):
         n.shutdown()
         th.join(timeout=3.0)

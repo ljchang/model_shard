@@ -45,6 +45,30 @@ handles the global→local expert-id translation; stock mlx-vlm `Experts` /
 `SwitchLinear` modules are untouched. See
 `docs/superpowers/specs/2026-04-17-phase5a-partial-expert-loading-design.md`.
 
+## Phase 5b status: Dynamic Expert Migration — complete
+
+A node can now request expert weights from any peer over TCP and slot them
+bit-exactly into its compact stacked tensor at runtime. Opt-in via
+`ENABLE_DYNAMIC_MIGRATION=true` (requires `ENABLE_PARTIAL_LOAD=true`). Scope:
+(A) per-(layer, expert) heat tracking as an EMA, (B) target-pull migration RPC,
+and (D) decode-loop hang fix; (C) policy threshold is a simple stub. Each node
+tracks expert activation heat; a background scanner periodically identifies
+experts that exceed `MIGRATION_HEAT_THRESHOLD` and issues pull requests to peers
+that hold the weights. Heat reports and ownership `ADD` deltas piggyback on
+existing SWIM `Ping`/`Ack`/`PingReq`/`PingReqAck` messages; `ExpertOrchestrator`
+routing resolves live owners via a `live_owners_provider` callback that unions
+the bootstrap `ShardSpec` with gossip-observed `ADD` deltas. Correctness is
+proven by `tests/test_migration_bit_exact_per_expert.py` (slice→attach bit-exact
+on real Gemma weights) and `tests/test_migration_over_tcp.py` (same proof across
+a real TCP round-trip). The decode-loop hang fix uses observer-triggered
+queue-poison to unblock the head immediately when any peer leaves `ALIVE`
+mid-decode; verified by `tests/test_decode_hang_fix_e2e.py`. Tier 1 regression:
+`tests/test_partial_load_tier1_migration.py` runs all 5 canonical prompts with
+both flags ON and confirms token-id bit-exact to the Phase 1 reference. Known
+carryover from 5a §7.5: sort-path FP noise limits bit-exactness to B*Seq ≤ 7 or
+prompts ≤ 8 tokens — documented in the spec. See
+`docs/superpowers/specs/2026-04-17-phase5b-dynamic-migration-design.md`.
+
 ## Phase 4 status: Load-Aware Routing — complete
 
 Nodes now gossip a compact queue-depth EMA to each other via `LoadReport` piggybacked

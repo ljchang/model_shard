@@ -47,7 +47,8 @@ def test_ownership_delta_propagates_within_three_rounds(gossip_env):
     sm = ShardMap({s.shard_id: s for s in specs})
     nodes = [Node(shard=s, shard_map=sm, total_layers=30) for s in specs]
     threads = [threading.Thread(target=n.serve_forever, daemon=True) for n in nodes]
-    for t in threads: t.start()
+    for t in threads:
+        t.start()
     try:
         # Wait for SWIM stabilization.
         time.sleep(2.0)
@@ -69,5 +70,7 @@ def test_ownership_delta_propagates_within_three_rounds(gossip_env):
             time.sleep(0.1)
         assert converged, "ownership ADD did not propagate to all peers"
     finally:
-        for n in nodes: n.shutdown()
-        for t in threads: t.join(timeout=3.0)
+        for n in nodes:
+            n.shutdown()
+        for t in threads:
+            t.join(timeout=3.0)

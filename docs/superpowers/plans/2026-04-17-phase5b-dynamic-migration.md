@@ -636,7 +636,7 @@ from model_shard.heat import HeatTracker
 
 def test_observe_increments_ema_for_each_expert():
     ht = HeatTracker(alpha=1.0, top_n=16)  # alpha=1 ⇒ current pick dominates
-    ht.observe(15, [3, 3, 7])
+    ht.observe(15, [3, 3, 3, 7])
     # With alpha=1 and 3 observed picks of expert 3 summed in one batch,
     # count = 3, ema = 3. Report stores EMA*100.
     report = ht.report()

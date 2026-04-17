@@ -48,7 +48,8 @@ def test_pull_over_tcp_matches_bit_exact(migration_env):
     node_b = Node(shard=spec_b, shard_map=sm, total_layers=30)
     t_a = threading.Thread(target=node_a.serve_forever, daemon=True)
     t_b = threading.Thread(target=node_b.serve_forever, daemon=True)
-    t_a.start(); t_b.start()
+    t_a.start()
+    t_b.start()
     time.sleep(0.5)
 
     try:
@@ -68,5 +69,7 @@ def test_pull_over_tcp_matches_bit_exact(migration_env):
         out_b = run_selected_experts(node_b._lm, h, 15, [3])
         assert mx.array_equal(out_a[3], out_b[3]).item()
     finally:
-        node_a.shutdown(); node_b.shutdown()
-        t_a.join(timeout=3.0); t_b.join(timeout=3.0)
+        node_a.shutdown()
+        node_b.shutdown()
+        t_a.join(timeout=3.0)
+        t_b.join(timeout=3.0)

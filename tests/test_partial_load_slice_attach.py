@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import threading
 import types
-from typing import Any
 
 import mlx.core as mx
 import pytest
@@ -121,5 +120,5 @@ def test_attach_then_slice_roundtrips():
     )
     attach_expert(lm, layer_idx=0, expert_id=42, tensors=sentinels, mlx_lock=lock)
     sliced = slice_expert(lm, layer_idx=0, expert_id=42, mlx_lock=lock)
-    for a, b in zip(sentinels, sliced):
+    for a, b in zip(sentinels, sliced, strict=True):
         assert mx.array_equal(a, b).item()

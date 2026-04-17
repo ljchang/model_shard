@@ -39,9 +39,9 @@ class HeatTracker:
             layer_idx = int(layer_idx)
             # Decay every currently-tracked expert for this layer toward 0
             # by (1-alpha), then fold in the observed counts.
-            for (l, e), v in list(self._ema.items()):
-                if l == layer_idx and e not in counts:
-                    self._ema[(l, e)] = (1.0 - self._alpha) * v
+            for (layer, e), v in list(self._ema.items()):
+                if layer == layer_idx and e not in counts:
+                    self._ema[(layer, e)] = (1.0 - self._alpha) * v
             for eid, c in counts.items():
                 prev = self._ema[(layer_idx, eid)]
                 self._ema[(layer_idx, eid)] = (
@@ -57,19 +57,19 @@ class HeatTracker:
         on type mismatch."""
         with self._lock:
             snapshot = [
-                (int(l), int(e), int(round(v * 100.0)))
-                for (l, e), v in self._ema.items()
+                (int(layer), int(e), round(v * 100.0))
+                for (layer, e), v in self._ema.items()
                 if v > 0.0
             ]
         snapshot.sort(key=lambda t: t[2], reverse=True)
         return snapshot[: self._top_n]
 
     def local_heat(self, layer_idx: int, expert_id: int) -> int:
-        """Return current EMA×100 for one (layer, expert), or 0 if untracked."""
+        """Return current EMA*100 for one (layer, expert), or 0 if untracked."""
         with self._lock:
-            return int(round(self._ema.get(
+            return round(self._ema.get(
                 (int(layer_idx), int(expert_id)), 0.0
-            ) * 100.0))
+            ) * 100.0)
 
 
 __all__ = ["HeatTracker"]

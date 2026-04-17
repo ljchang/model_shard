@@ -49,8 +49,10 @@ def test_observe_is_thread_safe():
         for _ in range(1000):
             ht.observe(15, [3])
     threads = [threading.Thread(target=worker) for _ in range(4)]
-    for t in threads: t.start()
-    for t in threads: t.join()
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
     # alpha=1 means every observe overwrites with count; after the last
     # observe lands ema ≈ count_from_that_call (non-deterministic but finite).
     assert ht.local_heat(15, 3) > 0

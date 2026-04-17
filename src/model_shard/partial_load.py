@@ -171,7 +171,7 @@ def attach_expert(
     switch_glu = layer.experts.switch_glu
     with mlx_lock:
         realized: list[mx.array] = []
-        for (proj_name, attr), incoming in zip(_PROJ_ATTR_ORDER, tensors):
+        for (proj_name, attr), incoming in zip(_PROJ_ATTR_ORDER, tensors, strict=True):
             proj = getattr(switch_glu, proj_name)
             current = getattr(proj, attr)
             grown = mx.concatenate(
