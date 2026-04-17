@@ -90,3 +90,17 @@ def test_node_has_pending_finalize_dict(monkeypatch):
     sm = ShardMap({"head": spec_head, "tail": spec_tail})
     n = Node(shard=spec_head, shard_map=sm, loaded_model=MagicMock(), total_layers=30)
     assert n._pending_finalize == {}
+
+
+def test_orchestrator_produces_split_layer_chain():
+    """Deferred to Task 8 slow Tier 1.
+
+    The split-layer chain's construction is entangled with real MLX router
+    behavior — the router's top_k_indices drive which experts get OP_EXPERT
+    entries, and the specific hash values depend on actual tensor bytes.
+    A fast test that mocked all of this would test mock plumbing rather
+    than real DAG shape. The slow Tier 1 test in Task 8
+    (``test_provenance_tier1.py``) exercises the full end-to-end chain
+    construction with a real Gemma 4 model."""
+    import pytest
+    pytest.skip("deferred to Task 8 slow Tier 1 — see docstring")
