@@ -6,19 +6,25 @@ proved the helpers reproduce the atomic ``layer(h, mask, c)`` path bit-
 for-bit when assembled a particular way; this module assembles them the
 same way.
 
-In this task only the all-local path is exercised — peers own no experts,
-so ``PeerRPC.call`` is never invoked. Task 12 wires up a real ``TcpPeerRPC``
-implementation behind the same ``PeerRPC`` Protocol.
+Task 12 wires up ``TcpPeerRPC`` — the production ``PeerRPC`` backed by the
+Phase 1 envelope transport — and parallelizes the peer fan-out with a
+thread pool. The all-local path (no peer RPCs) remains the fast path when
+a single node owns every routed expert for a given layer.
 """
 
 from __future__ import annotations
 
+import socket
 from collections.abc import Mapping
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 import mlx.core as mx
 
+from model_shard._pb import wire_pb2
+from model_shard.envelope import recv_envelope, send_envelope
+from model_shard.mlx_engine import bytes_to_tensor, tensor_to_bytes
 from model_shard.moe import (
     aggregate_experts,
     group_expert_ids_by_owner,
@@ -43,12 +49,111 @@ class PeerRPC(Protocol):
         ...
 
 
-@dataclass(frozen=True)
+def _dtype_to_wire(dt: mx.Dtype) -> int:
+    if dt == mx.bfloat16:
+        return int(wire_pb2.DTYPE_BFLOAT16)
+    if dt == mx.float32:
+        return int(wire_pb2.DTYPE_FLOAT32)
+    if dt == mx.float16:
+        return int(wire_pb2.DTYPE_FLOAT16)
+    raise ValueError(f"unsupported activation dtype: {dt}")
+
+
+class TcpPeerRPC:
+    """PeerRPC backed by the Phase 1 TCP envelope transport.
+
+    Opens a short-lived connection per call for simplicity (Phase 3 prototype
+    scope); a later phase can persist connections and multiplex requests.
+    The ``tensor_to_bytes`` / ``bytes_to_tensor`` pair in ``mlx_engine`` is
+    byte-exact for bf16, so the round-trip preserves the activation exactly.
+    """
+
+    def __init__(
+        self,
+        addresses: dict[str, tuple[str, int]],
+        timeout_s: float,
+    ) -> None:
+        self._addresses = addresses
+        self._timeout_s = timeout_s
+
+    def call(
+        self,
+        peer_shard_id: str,
+        request_id: str,
+        layer_idx: int,
+        expert_ids: list[int],
+        h: mx.array,
+    ) -> dict[int, mx.array]:
+        host, port = self._addresses[peer_shard_id]
+        s = socket.create_connection((host, port), timeout=self._timeout_s)
+        s.settimeout(self._timeout_s)
+        try:
+            stream = s.makefile("rwb")
+            req = wire_pb2.Envelope()
+            req.expert_request.protocol_version = 1
+            req.expert_request.request_id = request_id
+            req.expert_request.layer_idx = layer_idx
+            req.expert_request.expert_ids.extend(expert_ids)
+            # ``tensor_to_bytes`` takes only the array; the descriptor
+            # fields (shape/dtype/byte_count) are populated here so the
+            # receiver can rehydrate without guessing.
+            raw = tensor_to_bytes(h)
+            req.expert_request.h_spec.shape.extend(list(h.shape))
+            req.expert_request.h_spec.dtype = _dtype_to_wire(h.dtype)
+            req.expert_request.h_spec.quant = wire_pb2.QUANT_NONE
+            req.expert_request.h_spec.byte_count = len(raw)
+            send_envelope(stream, req, raw)
+            stream.flush()
+
+            env, tensor = recv_envelope(stream)
+            if env.WhichOneof("payload") == "error":
+                raise RuntimeError(
+                    f"peer {peer_shard_id} returned error "
+                    f"{env.error.code}: {env.error.detail}"
+                )
+            if env.WhichOneof("payload") != "expert_response":
+                raise RuntimeError(
+                    f"unexpected payload from peer {peer_shard_id}: "
+                    f"{env.WhichOneof('payload')}"
+                )
+            resp = env.expert_response
+            stacked = bytes_to_tensor(
+                tensor,
+                shape=list(resp.outputs_spec.shape),
+                dtype=resp.outputs_spec.dtype,
+            )
+            # Unstack along axis 2: [B, L, len(expert_ids), hidden] →
+            # {eid: [B, L, hidden]}.
+            return {
+                int(eid): stacked[:, :, j, :]
+                for j, eid in enumerate(resp.expert_ids)
+            }
+        finally:
+            s.close()
+
+
+@dataclass
 class ExpertOrchestrator:
+    """Runs one decoder layer with experts partitioned across shards.
+
+    Not frozen: holds a ``ThreadPoolExecutor`` for parallel peer fan-out.
+    The executor lifetime matches the orchestrator instance; callers that
+    create per-request orchestrators pay executor construction overhead,
+    so keep a single orchestrator per node per decode loop.
+    """
+
     self_shard_id: str
     owners: Mapping[str, set[int]]
     peer_rpc: PeerRPC
     rpc_timeout_s: float
+    _executor: ThreadPoolExecutor = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        # One worker per potential peer is plenty for Phase 3's 3-node cluster.
+        # ``max_workers=8`` leaves headroom without over-subscribing.
+        self._executor = ThreadPoolExecutor(
+            max_workers=8, thread_name_prefix="expert-rpc"
+        )
 
     def run_split_layer(
         self,
@@ -73,13 +178,21 @@ class ExpertOrchestrator:
         shared_out = run_shared_expert(lm, post_attn, layer_idx)
         local_outputs = run_selected_experts(lm, post_attn, layer_idx, local_ids)
 
-        # Serial peer RPC for the local-only test; Task 12 parallelizes this.
+        # Fan out to peers in parallel, gather with per-peer timeout.
         outputs: dict[int, mx.array] = dict(local_outputs)
-        for peer, ids in by_owner.items():
-            peer_outputs = self.peer_rpc.call(
-                peer, request_id, layer_idx, ids, post_attn
+        futures = {
+            peer: self._executor.submit(
+                self.peer_rpc.call, peer, request_id, layer_idx, ids, post_attn
             )
-            outputs.update(peer_outputs)
+            for peer, ids in by_owner.items()
+        }
+        for peer, fut in futures.items():
+            try:
+                outputs.update(fut.result(timeout=self.rpc_timeout_s))
+            except Exception as e:
+                raise RuntimeError(
+                    f"expert RPC to {peer} failed for layer {layer_idx}: {e}"
+                ) from e
 
         # Aggregate per position — same shape pattern as Task 9's proof.
         layer = lm.text_model.layers[layer_idx]
@@ -120,4 +233,4 @@ class ExpertOrchestrator:
         return out
 
 
-__all__ = ["ExpertOrchestrator", "PeerRPC"]
+__all__ = ["ExpertOrchestrator", "PeerRPC", "TcpPeerRPC"]
