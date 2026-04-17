@@ -172,7 +172,44 @@ def run_shared_expert(lm: Any, h: mx.array, layer_idx: int) -> mx.array:
     return out
 
 
+def aggregate_experts(
+    expert_outputs: dict[int, mx.array],
+    top_k_ids: list[int],
+    top_k_weights: mx.array,
+    shared_out: mx.array,
+    post_ffn_ln_2: Any,
+) -> mx.array:
+    """Two-branch sum matching mlx-vlm's DecoderLayer (spec §8):
+
+        routed = post_ffn_ln_2(Σ_j w[j] * expert_outputs[top_k_ids[j]])
+        return shared_out + routed
+
+    Iterates top-k in *slot order* (j = 0..k-1) — top_k_weights[..., j]
+    pairs with expert_outputs[top_k_ids[j]]. Do NOT sort by id.
+
+    `shared_out` is the dense-branch h1 = post_feedforward_layernorm_1(
+    mlp(pre_feedforward_layernorm(h))), passed in unchanged.
+
+    `post_ffn_ln_2` is a callable (typically layer.post_feedforward_layernorm_2)
+    applied only to the routed-branch sum.
+
+    Raises KeyError if any top_k_ids[j] is missing from expert_outputs.
+    """
+    if not top_k_ids:
+        raise ValueError("aggregate_experts: top_k_ids must be non-empty")
+    acc: mx.array | None = None
+    for j, eid in enumerate(top_k_ids):
+        if eid not in expert_outputs:
+            raise KeyError(f"expert {eid} output missing from aggregate_experts")
+        contrib = top_k_weights[..., j : j + 1] * expert_outputs[eid]
+        acc = contrib if acc is None else acc + contrib
+    assert acc is not None
+    result: mx.array = shared_out + post_ffn_ln_2(acc)
+    return result
+
+
 __all__ = [
+    "aggregate_experts",
     "group_expert_ids_by_owner",
     "run_attention_and_route",
     "run_selected_experts",
