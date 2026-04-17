@@ -1,11 +1,8 @@
 """Unit tests for MembershipRunner heat piggyback and reception."""
 from __future__ import annotations
 
-import dataclasses
-
 from model_shard.membership.config import SwimConfig
 from model_shard.membership.records import (
-    AckMsg,
     HeatReportRecord,
     PingMsg,
 )
