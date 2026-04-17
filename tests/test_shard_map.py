@@ -189,3 +189,51 @@ def test_shard_spec_udp_port_is_tcp_port_plus_1000() -> None:
         end_layer=10,
     )
     assert spec.udp_port == 10001
+
+
+def test_shard_spec_moe_experts_optional(tmp_path: Path) -> None:
+    cfg = tmp_path / "s.yaml"
+    cfg.write_text(
+        "shards:\n"
+        "  a:\n"
+        "    host: 127.0.0.1\n"
+        "    port: 9000\n"
+        "    start_layer: 0\n"
+        "    end_layer: 10\n"
+    )
+    sm = ShardMap.from_yaml(cfg)
+    assert sm.lookup("a").moe_experts == {}
+
+
+def test_shard_spec_moe_experts_parsed(tmp_path: Path) -> None:
+    cfg = tmp_path / "s.yaml"
+    cfg.write_text(
+        "shards:\n"
+        "  a:\n"
+        "    host: 127.0.0.1\n"
+        "    port: 9000\n"
+        "    start_layer: 0\n"
+        "    end_layer: 10\n"
+        "    moe_experts:\n"
+        "      15: [0, 3, 6, 126]\n"
+        "      18: [9, 12]\n"
+    )
+    sm = ShardMap.from_yaml(cfg)
+    spec = sm.lookup("a")
+    assert spec.moe_experts == {15: (0, 3, 6, 126), 18: (9, 12)}
+
+
+def test_shard_spec_moe_experts_rejects_non_int_layer_key(tmp_path: Path) -> None:
+    cfg = tmp_path / "s.yaml"
+    cfg.write_text(
+        "shards:\n"
+        "  a:\n"
+        "    host: 127.0.0.1\n"
+        "    port: 9000\n"
+        "    start_layer: 0\n"
+        "    end_layer: 10\n"
+        "    moe_experts:\n"
+        "      fifteen: [0, 3]\n"
+    )
+    with pytest.raises(ValueError, match="moe_experts"):
+        ShardMap.from_yaml(cfg)

@@ -14,7 +14,7 @@ Config format:
         end_layer: <int>    # half-open: [start_layer, end_layer)
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -32,6 +32,9 @@ class ShardSpec:
     address: NodeAddress
     start_layer: int
     end_layer: int
+    # Layer-index -> tuple of expert IDs this shard hosts for that layer.
+    # Empty dict if this shard does not participate in expert-level sharding.
+    moe_experts: dict[int, tuple[int, ...]] = field(default_factory=dict)
 
     @property
     def udp_port(self) -> int:
@@ -70,9 +73,11 @@ class ShardMap:
         for shard_id, spec in shards_cfg.items():
             if not isinstance(spec, dict):
                 raise ValueError(f"shard {shard_id!r} entry must be a mapping")
-            for field in ("host", "port", "start_layer", "end_layer"):
-                if field not in spec:
-                    raise ValueError(f"shard {shard_id!r} missing {field!r}")
+            for required_field in ("host", "port", "start_layer", "end_layer"):
+                if required_field not in spec:
+                    raise ValueError(
+                        f"shard {shard_id!r} missing {required_field!r}"
+                    )
 
             port_raw = spec["port"]
             if not isinstance(port_raw, int) or isinstance(port_raw, bool):
@@ -98,11 +103,34 @@ class ShardMap:
                     f"start_layer ({start_layer})"
                 )
 
+            moe_raw = spec.get("moe_experts", {})
+            if not isinstance(moe_raw, dict):
+                raise ValueError(
+                    f"shard {shard_id!r} moe_experts must be a mapping, got "
+                    f"{type(moe_raw).__name__}"
+                )
+            moe_experts: dict[int, tuple[int, ...]] = {}
+            for layer_key, ids in moe_raw.items():
+                if not isinstance(layer_key, int) or isinstance(layer_key, bool):
+                    raise ValueError(
+                        f"shard {shard_id!r} moe_experts key {layer_key!r} "
+                        f"must be int"
+                    )
+                if not isinstance(ids, list) or not all(
+                    isinstance(i, int) and not isinstance(i, bool) for i in ids
+                ):
+                    raise ValueError(
+                        f"shard {shard_id!r} moe_experts[{layer_key}] must be "
+                        f"a list of ints"
+                    )
+                moe_experts[layer_key] = tuple(ids)
+
             sid = str(shard_id)
             entries[sid] = ShardSpec(
                 shard_id=sid,
                 address=NodeAddress(host=str(spec["host"]), port=port_raw),
                 start_layer=start_layer,
                 end_layer=end_layer,
+                moe_experts=moe_experts,
             )
         return cls(entries)
