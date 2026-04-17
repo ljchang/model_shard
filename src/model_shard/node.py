@@ -36,10 +36,7 @@ import socket
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, BinaryIO, cast
-
-if TYPE_CHECKING:
-    from model_shard.request import ProvenanceEntry
+from typing import Any, BinaryIO, cast
 
 import mlx.core as mx
 
@@ -71,6 +68,7 @@ from model_shard.mlx_engine import (
     tensor_to_bytes,
 )
 from model_shard.partial_load import attach_expert, slice_expert
+from model_shard.request import ProvenanceEntry
 from model_shard.shard_map import ShardMap, ShardSpec
 
 _LOG = logging.getLogger(__name__)
@@ -160,6 +158,8 @@ class Node:
         self._state_lock = threading.Lock()
         self._kv_caches: dict[str, list[Any]] = {}
         self._head_states: dict[str, _HeadRequestState] = {}
+        # Phase 6-B: finalize entry stashed per-request for Task 8 to attach to SampledToken.
+        self._pending_finalize: dict[str, ProvenanceEntry] = {}
 
         self._out_lock = threading.Lock()
         self._out_sock: socket.socket | None = None
@@ -573,16 +573,14 @@ class Node:
                 from model_shard.provenance import build_entry, entry_from_pb
                 from model_shard.request import OpDescriptor, OpType
                 inbound_chain = [entry_from_pb(p) for p in act.provenance] if len(act.provenance) > 0 else []
-                _parent_hashes = (inbound_chain[-1].hash,) if inbound_chain else ()
-                _finalize_entry = build_entry(
+                parent_hashes = (inbound_chain[-1].hash,) if inbound_chain else ()
+                finalize_entry = build_entry(
                     node_id=self._shard.shard_id,
                     op=OpDescriptor(op_type=OpType.OP_FINALIZE),
                     output_tensor=logits,
-                    parent_hashes=_parent_hashes,
+                    parent_hashes=parent_hashes,
                 )
-                # Chain with finalize entry built locally; not yet forwarded to
-                # client (SampledToken wire field is out of scope until Task 8).
-                _ = [*inbound_chain, _finalize_entry]
+                self._pending_finalize[act.request_id] = finalize_entry
             token_id = int(mx.argmax(logits[0, -1, :]).item())
             # Position is managed by the head; we leave it 0 here.
             self._send_sampled_token(act.request_id, token_id, position=0)
@@ -605,6 +603,7 @@ class Node:
         with self._state_lock:
             self._kv_caches.pop(req.request_id, None)
             self._head_states.pop(req.request_id, None)
+            self._pending_finalize.pop(req.request_id, None)
             # Intentionally do NOT drop _debug_captures here — tests read them
             # after the request completes. Production impact is a tiny memory
             # retention per request; cleared explicitly via clear_debug_captures().

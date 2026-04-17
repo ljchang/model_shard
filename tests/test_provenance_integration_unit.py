@@ -81,3 +81,12 @@ def test_node_split_layers_for_shard():
     assert n._split_layers_for_shard("mid") == {15}
     assert n._split_layers_for_shard("head") == set()
     assert n._split_layers_for_shard("unknown") == set()
+
+
+def test_node_has_pending_finalize_dict(monkeypatch):
+    monkeypatch.setenv("ENABLE_PROVENANCE", "true")
+    spec_head = _mk_spec("head", 30510, 0, 10)
+    spec_tail = _mk_spec("tail", 30511, 10, 30)
+    sm = ShardMap({"head": spec_head, "tail": spec_tail})
+    n = Node(shard=spec_head, shard_map=sm, loaded_model=MagicMock(), total_layers=30)
+    assert n._pending_finalize == {}
