@@ -26,6 +26,7 @@ from model_shard.membership.messages import (
 )
 from model_shard.membership.records import (
     AckMsg,
+    HeatReportRecord,
     IncomingMessage,
     LoadReportRecord,
     PingMsg,
@@ -79,6 +80,10 @@ class MembershipRunner:
         self._peer_loads: dict[str, LoadReportRecord] = {}
         self._peer_loads_lock = threading.Lock()
 
+        self._heat_source: Callable[[], HeatReportRecord] | None = None
+        self._peer_heat: dict[str, HeatReportRecord] = {}
+        self._peer_heat_lock = threading.Lock()
+
         self._transport = UDPTransport(
             host=self_spec.host,
             port=self_spec.udp_port,
@@ -121,6 +126,16 @@ class MembershipRunner:
         with self._peer_loads_lock:
             return dict(self._peer_loads)
 
+    def start_heat_source(self, fn: Callable[[], HeatReportRecord]) -> None:
+        """Register a callable invoked once per outgoing ping-family message
+        to produce this node's own heat report. Latest registration wins."""
+        self._heat_source = fn
+
+    def latest_heat(self) -> dict[str, HeatReportRecord]:
+        """Return a snapshot of the most recent heat report seen per peer."""
+        with self._peer_heat_lock:
+            return dict(self._peer_heat)
+
     @property
     def state(self) -> MembershipState:
         return self._state
@@ -141,6 +156,11 @@ class MembershipRunner:
             with self._peer_loads_lock:
                 for lr in loads:
                     self._peer_loads[lr.shard_id] = lr
+        heat = getattr(decoded, "heat", None)
+        if heat:
+            with self._peer_heat_lock:
+                for hr in heat:
+                    self._peer_heat[hr.shard_id] = hr
         try:
             self._inbox.put_nowait(decoded)
         except queue.Full:
@@ -187,6 +207,27 @@ class MembershipRunner:
                         else:
                             new_outgoing.append(o)
                     outgoing = new_outgoing
+
+            if self._heat_source is not None:
+                try:
+                    my_heat = self._heat_source()
+                except Exception:
+                    _LOG.exception("heat source raised; skipping heat piggyback")
+                    my_heat = None
+                if my_heat is not None:
+                    new_outgoing2 = []
+                    for o in outgoing:
+                        p = o.payload
+                        if isinstance(p, (PingMsg, AckMsg, PingReqMsg, PingReqAckMsg)):
+                            new_payload = dataclasses.replace(
+                                p, heat=[*p.heat, my_heat]
+                            )
+                            new_outgoing2.append(
+                                dataclasses.replace(o, payload=new_payload)
+                            )
+                        else:
+                            new_outgoing2.append(o)
+                    outgoing = new_outgoing2
 
             for o in outgoing:
                 addr = self._addr_by_id.get(o.target_shard_id)
