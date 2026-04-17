@@ -48,6 +48,7 @@ def run_attention_and_route(
     layer_idx: int,
     cache: list[Any],
     masks: tuple[Any, Any],
+    heat_observer: Callable[[int, list[int]], None] | None = None,
 ) -> tuple[mx.array, mx.array, mx.array]:
     """Run attention + LN + router for one Gemma4 decoder layer.
 
@@ -84,6 +85,14 @@ def run_attention_and_route(
     # Router lives directly on the DecoderLayer (layer.router), not under
     # layer.mlp. It returns (top_k_indices, top_k_weights) already scaled.
     top_k_ids, top_k_weights = layer.router(post_attn)
+
+    if heat_observer is not None:
+        # CRITICAL: pass the FLAT per-token-per-k id list, not a deduplicated
+        # set. Spec §D2 says "every time its own routing selects that expert"
+        # — batch-weighted heat is load-bearing for the policy decider.
+        ids_flat = [int(x) for x in top_k_ids.reshape(-1).tolist()]
+        heat_observer(layer_idx, ids_flat)
+
     return post_attn, top_k_ids, top_k_weights
 
 

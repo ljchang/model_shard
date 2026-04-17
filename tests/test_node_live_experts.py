@@ -1,8 +1,10 @@
 """Tests for Node._live_experts runtime ownership registry."""
 from __future__ import annotations
 
+import types
 from unittest.mock import MagicMock
 
+import mlx.core as mx
 import pytest
 
 from model_shard.node import Node
@@ -53,3 +55,40 @@ def test_owners_of_resolves_union():
     assert n.owners_of(15, 3) == {"A", "B"}
     assert n.owners_of(15, 7) == {"B"}
     assert n.owners_of(15, 99) == set()
+
+
+def test_attach_path_updates_live_experts_and_announces(monkeypatch):
+    monkeypatch.setenv("ENABLE_GOSSIP", "false")
+    monkeypatch.setenv("ENABLE_PARTIAL_LOAD", "false")
+    monkeypatch.setenv("ENABLE_DYNAMIC_MIGRATION", "false")
+    spec = _mk_spec("self", 30150, {15: (0, 3)})
+    spec_peer = _mk_spec("peer", 30151, {15: (1, 4)})
+    sm = ShardMap({"self": spec, "peer": spec_peer})
+    lm = MagicMock()
+    lm.held_ids_per_layer = {15: (0, 3)}
+    # Synthesize a mutable switch_glu so attach_expert succeeds.
+    def _stack(n: int, cols: int) -> mx.array:
+        return mx.zeros((n, 4, cols))
+    projs = {
+        name: types.SimpleNamespace(
+            weight=_stack(2, 4), scales=_stack(2, 8), biases=_stack(2, 8),
+        )
+        for name in ("gate_proj", "up_proj", "down_proj")
+    }
+    layer = types.SimpleNamespace(
+        experts=types.SimpleNamespace(switch_glu=types.SimpleNamespace(**projs))
+    )
+    lm.text_model = types.SimpleNamespace(layers=[None] * 15 + [layer])
+    n = Node(shard=spec, shard_map=sm, loaded_model=lm, total_layers=30)
+
+    # 9 tensors in _PROJ_ATTR_ORDER: (gate_proj, up_proj, down_proj) x
+    # (weight=(4,4), scales=(4,8), biases=(4,8)) — shapes must match the
+    # current stacked attr (n, 4, cols) with the leading expert-count dim removed.
+    new_tensors = [
+        mx.zeros((4, 4)), mx.zeros((4, 8)), mx.zeros((4, 8)),  # gate_proj
+        mx.zeros((4, 4)), mx.zeros((4, 8)), mx.zeros((4, 8)),  # up_proj
+        mx.zeros((4, 4)), mx.zeros((4, 8)), mx.zeros((4, 8)),  # down_proj
+    ]
+    n.migration_attach(layer_idx=15, expert_id=7, tensors=new_tensors)
+    assert 7 in n._live_experts[15]
+    assert ("self", 15, 7) in n._ownership_seen

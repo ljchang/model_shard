@@ -47,9 +47,15 @@ from model_shard.expert_orchestrator import (
     ExpertRpcFailure,
     TcpPeerRPC,
 )
+from model_shard.heat import HeatTracker
 from model_shard.load import LoadTracker
 from model_shard.membership import MembershipRunner, PeerSpec, SwimConfig
-from model_shard.membership.records import LoadReportRecord, StateTransition
+from model_shard.membership.records import HeatReportRecord, LoadReportRecord, StateTransition
+from model_shard.migration import (
+    ExpertWeightPeerRPC,
+    MigrationPolicy,
+    MigrationScanner,
+)
 from model_shard.mlx_engine import (
     LoadedModel,
     bytes_to_tensor,
@@ -60,7 +66,7 @@ from model_shard.mlx_engine import (
     run_layers,
     tensor_to_bytes,
 )
-from model_shard.partial_load import slice_expert
+from model_shard.partial_load import attach_expert, slice_expert
 from model_shard.shard_map import ShardMap, ShardSpec
 
 _LOG = logging.getLogger(__name__)
@@ -107,6 +113,10 @@ class Node:
                 for eid in ids:
                     self._ownership_seen.add((sid, layer, eid))
         self._ownership_seen_lock = threading.Lock()
+
+        # Phase 5b: per-node heat tracker for routing-count EMA.
+        self._heat_tracker = HeatTracker()
+
         # Phase 5a: when ENABLE_PARTIAL_LOAD is set AND the caller did not
         # pass a pre-loaded model AND this shard actually hosts routed
         # experts, build the model via ``load_model_partial`` so only the
@@ -166,6 +176,48 @@ class Node:
                 )
             self._membership.start_load_source(_load_source)
 
+            def _self_heat_report() -> HeatReportRecord:
+                return HeatReportRecord(
+                    shard_id=self._shard.shard_id,
+                    entries=tuple(self._heat_tracker.report()),
+                    ts_unix_ms=int(time.time() * 1000),
+                )
+            self._membership.start_heat_source(_self_heat_report)
+
+        # Phase 5b: migration scanner (opt-in via ENABLE_DYNAMIC_MIGRATION).
+        self._scanner: MigrationScanner | None = None
+        if _dynamic_migration_enabled():
+            policy = MigrationPolicy(
+                scan_interval_s=_migration_scan_interval_s(),
+                heat_threshold=_migration_heat_threshold(),
+                max_experts_per_layer=_migration_max_experts_per_layer(),
+            )
+            addresses = {
+                sid: (
+                    shard_map.lookup(sid).address.host,
+                    shard_map.lookup(sid).address.port,
+                )
+                for sid in shard_map.all_shards()
+                if sid != shard.shard_id
+            }
+            self._scanner = MigrationScanner(
+                self_shard_id=shard.shard_id,
+                policy=policy,
+                heat_tracker=self._heat_tracker,
+                live_experts=self._live_experts,
+                owner_lookup=self.owners_of,
+                load_provider=self._loads_snapshot,
+                peer_rpc=ExpertWeightPeerRPC(
+                    addresses=addresses, timeout_s=60.0
+                ),
+                attacher=self.migration_attach,
+                ownership_announcer=(
+                    self._membership.announce_ownership_add
+                    if self._membership is not None
+                    else (lambda lyr, e: None)
+                ),
+            )
+
         # Phase 3 expert sharding. Construct an ``ExpertOrchestrator`` only on
         # nodes whose layer range (i.e., whose attention) covers a split layer
         # in ``self._shard.moe_experts``. Other nodes merely serve inbound
@@ -200,6 +252,8 @@ class Node:
         if self._membership is not None:
             self._membership.subscribe(self._on_membership_change)
             self._membership.start()
+        if self._scanner is not None:
+            self._scanner.start()
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((self._shard.address.host, self._shard.address.port))
@@ -225,6 +279,8 @@ class Node:
         self._stopping.set()
         if self._membership is not None:
             self._membership.stop()
+        if self._scanner is not None:
+            self._scanner.stop()
         if self._orchestrator is not None:
             self._orchestrator.close()
 
@@ -742,6 +798,30 @@ class Node:
                 if lyr == layer_idx and eid == expert_id
             }
 
+    def migration_attach(
+        self, layer_idx: int, expert_id: int, tensors: list[mx.array]
+    ) -> None:
+        """Receive-side integration: call attach_expert, update _live_experts,
+        add to _ownership_seen, announce ADD delta on gossip (if running)."""
+        attach_expert(
+            self._lm, layer_idx, expert_id, tensors, _MLX_COMPUTE_LOCK
+        )
+        self._live_experts.setdefault(layer_idx, set()).add(expert_id)
+        with self._ownership_seen_lock:
+            self._ownership_seen.add((self._shard.shard_id, layer_idx, expert_id))
+        if self._membership is not None:
+            self._membership.announce_ownership_add(layer_idx, expert_id)
+
+    def _loads_snapshot(self) -> dict[str, int]:
+        """Current peer loads from gossip, used by MigrationScanner to pick
+        the least-loaded source shard for a pull."""
+        if self._membership is None:
+            return {}
+        return {
+            sid: lr.queue_depth_ema
+            for sid, lr in self._membership.latest_loads().items()
+        }
+
     def _build_expert_orchestrator(self) -> ExpertOrchestrator:
         """Construct an ExpertOrchestrator that fans out to peers via TCP.
 
@@ -778,6 +858,19 @@ class Node:
                 for sid, lr in self._membership.latest_loads().items()
             }
 
+        # Phase 5b: adapt owners_of(layer_idx, expert_id) -> Callable[[int], set[str]]
+        # by closing over _split_layers.  For each expert id queried at routing
+        # time, we union the live-owners sets across every split layer this
+        # orchestrator attends. (In practice a single expert id appears in at
+        # most one layer, so the union is the same as a direct per-layer lookup.)
+        _split_for_closure = self._split_layers
+
+        def _live_owners_for_expert(eid: int) -> set[str]:
+            result: set[str] = set()
+            for lyr in _split_for_closure:
+                result |= self.owners_of(lyr, eid)
+            return result
+
         return ExpertOrchestrator(
             self_shard_id=self._shard.shard_id,
             owners=owners,
@@ -786,6 +879,8 @@ class Node:
             mlx_lock=_MLX_COMPUTE_LOCK,
             loads_provider=_loads_provider,
             rng=_random_mod.Random(),
+            heat_observer=self._heat_tracker.observe,
+            live_owners_provider=_live_owners_for_expert,
         )
 
     def _build_membership_runner(self) -> MembershipRunner:
@@ -948,6 +1043,24 @@ def _partial_load_enabled() -> bool:
     pre-loaded-model path and instead calls ``load_model_partial`` using
     ``shard.moe_experts`` as the held-expert map."""
     return os.environ.get("ENABLE_PARTIAL_LOAD", "false").lower() in ("1", "true", "yes")
+
+
+def _dynamic_migration_enabled() -> bool:
+    return os.environ.get("ENABLE_DYNAMIC_MIGRATION", "false").lower() in (
+        "1", "true", "yes"
+    )
+
+
+def _migration_scan_interval_s() -> float:
+    return float(os.environ.get("MIGRATION_SCAN_INTERVAL_SECONDS", "10.0"))
+
+
+def _migration_heat_threshold() -> int:
+    return int(os.environ.get("MIGRATION_HEAT_THRESHOLD", "50"))
+
+
+def _migration_max_experts_per_layer() -> int:
+    return int(os.environ.get("MIGRATION_MAX_EXPERTS_PER_LAYER", "128"))
 
 
 __all__ = ["Node"]

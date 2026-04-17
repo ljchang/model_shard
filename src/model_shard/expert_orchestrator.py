@@ -174,6 +174,7 @@ class ExpertOrchestrator:
     )
     rng: random.Random = field(default_factory=random.Random)
     live_owners_provider: Callable[[int], set[str]] | None = None
+    heat_observer: Callable[[int, list[int]], None] | None = None
     _executor: ThreadPoolExecutor = field(init=False, repr=False)
     # Observer-abort bookkeeping. Each active `run_split_layer` registers a
     # per-peer threading.Event; ``notify_peer_left_alive`` sets every event
@@ -331,7 +332,8 @@ class ExpertOrchestrator:
         # stream with concurrent graph construction.
         with self._mlx_guard():
             post_attn, top_k_ids, top_k_weights = run_attention_and_route(
-                lm, h, layer_idx, cache, masks
+                lm, h, layer_idx, cache, masks,
+                heat_observer=self.heat_observer,
             )
             mx.eval(top_k_ids)
             # Union of all top-k ids across the batch and sequence.
