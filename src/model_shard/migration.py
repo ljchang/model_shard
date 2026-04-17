@@ -204,5 +204,38 @@ class MigrationScanner:
         finally:
             self._in_flight.release()
 
+    def start(self) -> None:
+        """Start the background scan thread. Idempotent."""
+        if self._thread is not None:
+            return
+        self._thread = _threading.Thread(
+            target=self._run_loop, name="migration-scanner", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        """Signal the scan thread to stop and join. Idempotent."""
+        self._stopping.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+
+    def _run_loop(self) -> None:
+        """Scan on a jittered interval until stopped.
+
+        The ±25% jitter per tick avoids synchronized cluster-wide scans that
+        could stampede the same hot expert simultaneously (see spec §R5).
+        Per-tick exceptions are logged and do not halt the loop — the scanner
+        must be robust against downstream failures in pull/attach/announce.
+        """
+        while not self._stopping.is_set():
+            jitter = 1.0 + self._rng.uniform(-0.25, 0.25)
+            self._stopping.wait(self._policy.scan_interval_s * jitter)
+            if self._stopping.is_set():
+                return
+            try:
+                self._scan_once()
+            except Exception:
+                _LOG.exception("scan_once raised")
+
 
 __all__ = ["ExpertWeightPeerRPC", "MigrationPolicy", "MigrationScanner"]

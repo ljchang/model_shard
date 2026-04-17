@@ -1,6 +1,7 @@
 """Scanner policy tests — _scan_once picks the hottest not-held expert."""
 from __future__ import annotations
 
+import time
 from unittest.mock import MagicMock
 
 from model_shard.migration import MigrationPolicy, MigrationScanner
@@ -118,3 +119,50 @@ def test_scan_once_skips_own_shard_as_source():
     s._scan_once()
     # Would be pointless to pull from self.
     s._peer_rpc.pull.assert_not_called()
+
+
+def test_scanner_start_and_stop_clean():
+    live: dict[int, set[int]] = {15: {0, 3}}
+    pulled: list = []
+    s = _make_scanner(heat={}, live=live, owners={}, pulled=pulled)
+    s.start()
+    time.sleep(0.1)
+    s.stop()
+    assert s._thread is not None
+    assert not s._thread.is_alive()
+
+
+def test_scanner_start_is_idempotent():
+    live: dict[int, set[int]] = {15: {0, 3}}
+    s = _make_scanner(heat={}, live=live, owners={}, pulled=[])
+    s.start()
+    first_thread = s._thread
+    s.start()  # second call should no-op, not create a new thread
+    assert s._thread is first_thread
+    s.stop()
+
+
+def test_scan_once_exception_does_not_kill_loop():
+    """If scan_once throws, the loop logs and continues instead of exiting."""
+    live: dict[int, set[int]] = {15: {0, 3}}
+    s = _make_scanner(heat={}, live=live, owners={}, pulled=[])
+    call_count = [0]
+
+    # Monkey-patch _scan_once to raise on first call, succeed on second.
+    original = s._scan_once
+    def flaky():
+        call_count[0] += 1
+        if call_count[0] == 1:
+            raise RuntimeError("simulated failure")
+        original()
+    s._scan_once = flaky  # type: ignore[method-assign]
+    s._policy = MigrationPolicy(
+        scan_interval_s=0.01, heat_threshold=50, max_experts_per_layer=128,
+    )
+
+    s.start()
+    # Give the loop time to tick a few times.
+    time.sleep(0.2)
+    s.stop()
+    # Loop should have continued past the first exception.
+    assert call_count[0] >= 2
