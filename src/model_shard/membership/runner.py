@@ -10,6 +10,7 @@ Observer callbacks are invoked from the runner thread, after `state.tick` /
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import queue
 import random
@@ -23,7 +24,15 @@ from model_shard.membership.messages import (
     decode_membership_envelope,
     encode_membership_envelope,
 )
-from model_shard.membership.records import IncomingMessage, StateTransition
+from model_shard.membership.records import (
+    AckMsg,
+    IncomingMessage,
+    LoadReportRecord,
+    PingMsg,
+    PingReqAckMsg,
+    PingReqMsg,
+    StateTransition,
+)
 from model_shard.membership.state import MembershipState, PeerSpec
 from model_shard.membership.transport import UDPTransport
 
@@ -66,6 +75,10 @@ class MembershipRunner:
         self._stopping = threading.Event()
         self._thread: threading.Thread | None = None
 
+        self._load_source: Callable[[], LoadReportRecord] | None = None
+        self._peer_loads: dict[str, LoadReportRecord] = {}
+        self._peer_loads_lock = threading.Lock()
+
         self._transport = UDPTransport(
             host=self_spec.host,
             port=self_spec.udp_port,
@@ -96,6 +109,18 @@ class MembershipRunner:
         with self._observers_lock:
             self._observers.append(callback)
 
+    def start_load_source(self, fn: Callable[[], LoadReportRecord]) -> None:
+        """Register a callable invoked once per outgoing ping-family message
+        to produce this node's own load report. Safe to set multiple times;
+        the latest wins."""
+        self._load_source = fn
+
+    def latest_loads(self) -> dict[str, LoadReportRecord]:
+        """Return a snapshot of the most recent load report seen per peer
+        shard_id. Caller is responsible for filtering by staleness."""
+        with self._peer_loads_lock:
+            return dict(self._peer_loads)
+
     @property
     def state(self) -> MembershipState:
         return self._state
@@ -106,10 +131,23 @@ class MembershipRunner:
         decoded = decode_membership_envelope(data)
         if decoded is None:
             return
+        self._on_recv_decoded(decoded)
+
+    def _on_recv_decoded(self, decoded: IncomingMessage) -> None:
+        """Scrape any load reports carried on the message and post the
+        decoded message onto the runner's inbox."""
+        loads = getattr(decoded, "loads", None)
+        if loads:
+            with self._peer_loads_lock:
+                for lr in loads:
+                    self._peer_loads[lr.shard_id] = lr
         try:
             self._inbox.put_nowait(decoded)
         except queue.Full:
-            _LOG.warning("membership inbox full; dropping message %s", type(decoded).__name__)
+            _LOG.warning(
+                "membership inbox full; dropping message %s",
+                type(decoded).__name__,
+            )
 
     # ---------------------------------------------------------------- run loop
 
@@ -126,6 +164,29 @@ class MembershipRunner:
                 except queue.Empty:
                     break
                 outgoing.extend(self._state.recv(msg, time.monotonic()))
+
+            # Phase 4: piggyback own-load on outgoing ping-family messages.
+            if self._load_source is not None:
+                try:
+                    my_load = self._load_source()
+                except Exception:
+                    _LOG.exception("load source raised; skipping load piggyback")
+                    my_load = None
+                if my_load is not None:
+                    new_outgoing = []
+                    for o in outgoing:
+                        p = o.payload
+                        if isinstance(p, (PingMsg, AckMsg, PingReqMsg, PingReqAckMsg)):
+                            new_payload = dataclasses.replace(
+                                p, loads=[*p.loads, my_load]
+                            )
+                            # OutgoingMessage may be frozen; construct a fresh one.
+                            new_outgoing.append(
+                                dataclasses.replace(o, payload=new_payload)
+                            )
+                        else:
+                            new_outgoing.append(o)
+                    outgoing = new_outgoing
 
             for o in outgoing:
                 addr = self._addr_by_id.get(o.target_shard_id)
