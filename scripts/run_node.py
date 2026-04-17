@@ -36,18 +36,30 @@ def _start_membership_debug_endpoint(node: Node, debug_port: int) -> None:
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self) -> None:
-            if self.path != "/membership":
+            if self.path == "/membership":
+                if handler_node.membership is None:
+                    payload: dict[str, object] = {}
+                else:
+                    view = handler_node.membership.state.view()
+                    payload = {
+                        sid: {"state": rec.state.name, "incarnation": rec.incarnation}
+                        for sid, rec in view.items()
+                    }
+            elif self.path == "/loads":
+                if handler_node.membership is None:
+                    payload = {}
+                else:
+                    payload = {
+                        sid: {
+                            "queue_depth_ema": lr.queue_depth_ema,
+                            "ts_unix_ms": lr.ts_unix_ms,
+                        }
+                        for sid, lr in handler_node.membership.latest_loads().items()
+                    }
+            else:
                 self.send_response(404)
                 self.end_headers()
                 return
-            if handler_node.membership is None:
-                payload: dict[str, object] = {}
-            else:
-                view = handler_node.membership.state.view()
-                payload = {
-                    sid: {"state": rec.state.name, "incarnation": rec.incarnation}
-                    for sid, rec in view.items()
-                }
             body = json.dumps(payload).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
