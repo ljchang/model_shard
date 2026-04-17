@@ -32,7 +32,8 @@ class _SharedLmPeerRPC:
         self._already_failed: set[str] = set()
 
     def call(
-        self, peer_shard_id, request_id, layer_idx, expert_ids, h
+        self, peer_shard_id, request_id, layer_idx, expert_ids, h,
+        provenance_pb_out=None, provenance_pb_in=None,
     ):
         if (
             peer_shard_id in self._fail_once_for

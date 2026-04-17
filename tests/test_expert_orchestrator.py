@@ -29,6 +29,8 @@ class _NoRpc(PeerRPC):
         layer_idx: int,
         expert_ids: list[int],
         h: mx.array,
+        provenance_pb_out: list | None = None,
+        provenance_pb_in: list | None = None,
     ) -> dict[int, mx.array]:
         raise AssertionError("should not be called when all experts are local")
 
@@ -109,6 +111,8 @@ def test_orchestrator_multi_owner_routes_to_less_loaded(loaded_model: Any) -> No
             layer_idx: int,
             expert_ids: list[int],
             h: mx.array,
+            provenance_pb_out: list | None = None,
+            provenance_pb_in: list | None = None,
         ) -> dict[int, mx.array]:
             self.calls.append((peer_shard_id, sorted(expert_ids)))
             raise AssertionError(

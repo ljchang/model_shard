@@ -689,6 +689,35 @@ class Node:
         self._in_flight_expert_requests += 1
         self._load_tracker.observe(self._in_flight_expert_requests)
         try:
+            # Phase 6-B: validate + build provenance entries (if present and enabled).
+            # We do validate+build in one block to avoid double-importing and to
+            # share the parsed inbound_chain between validation and entry building.
+            inbound_prov_chain: list[Any] = []
+            if self._provenance_enabled and len(req.provenance) > 0:
+                from model_shard.provenance import (
+                    ProvenanceError,
+                    entry_from_pb,
+                    validate_chain,
+                )
+                try:
+                    inbound_prov_chain = [entry_from_pb(p) for p in req.provenance]
+                    validate_chain(
+                        inbound_prov_chain,
+                        shard_lookup=self._shard_lookup,
+                        total_layers=self._total_layers,
+                        split_layers_for_shard=self._split_layers_for_shard,
+                        live_owners_of=self.owners_of,
+                        tail_tensor_bytes=tensor_bytes,  # post_attn bytes
+                    )
+                except ProvenanceError as exc:
+                    _send_error(
+                        inbound_stream,
+                        req.request_id,
+                        wire_pb2.ERR_INVALID_PROVENANCE,
+                        str(exc),
+                    )
+                    return
+
             try:
                 with _MLX_COMPUTE_LOCK:
                     outputs = run_selected_experts(
@@ -722,6 +751,25 @@ class Node:
             resp.expert_response.outputs_spec.dtype = _mx_to_wire_dtype(stacked.dtype)
             resp.expert_response.outputs_spec.quant = wire_pb2.QUANT_NONE
             resp.expert_response.outputs_spec.byte_count = len(raw)
+
+            # Phase 6-B: build OP_EXPERT entries and attach to response.
+            if inbound_prov_chain:
+                from model_shard.provenance import build_entry, entry_to_pb
+                from model_shard.request import OpDescriptor, OpType
+                ar_hash = inbound_prov_chain[-1].hash  # last entry = OP_ATTENTION_ROUTE
+                for eid in requested:
+                    entry = build_entry(
+                        node_id=self._shard.shard_id,
+                        op=OpDescriptor(
+                            op_type=OpType.OP_EXPERT,
+                            layer_idx=layer_idx,
+                            expert_id=eid,
+                        ),
+                        output_tensor=outputs[eid],
+                        parent_hashes=(ar_hash,),
+                    )
+                    resp.expert_response.provenance.append(entry_to_pb(entry))
+
             send_envelope(inbound_stream, resp, raw)
         finally:
             self._in_flight_expert_requests -= 1

@@ -36,6 +36,7 @@ from model_shard.moe import (
     run_selected_experts,
     run_shared_expert,
 )
+from model_shard.request import OpDescriptor, OpType, ProvenanceEntry
 
 
 class ExpertRpcFailure(RuntimeError):  # noqa: N818 — explicit name per plan
@@ -61,10 +62,16 @@ class PeerRPC(Protocol):
         layer_idx: int,
         expert_ids: list[int],
         h: mx.array,
+        provenance_pb_out: list[Any] | None = None,
+        provenance_pb_in: list[Any] | None = None,
     ) -> dict[int, mx.array]:
         """Send an ExpertRequest to ``peer_shard_id``, block for the
         ExpertResponse, and return ``{expert_id: output tensor}``. Must
-        raise on timeout or RPC error."""
+        raise on timeout or RPC error.
+
+        ``provenance_pb_in`` is attached to the outbound ExpertRequest.
+        ``provenance_pb_out`` is a mutable list; the implementation appends
+        any provenance entries from the ExpertResponse into it."""
         ...
 
 
@@ -92,6 +99,8 @@ class TcpPeerRPC:
         layer_idx: int,
         expert_ids: list[int],
         h: mx.array,
+        provenance_pb_out: list[Any] | None = None,
+        provenance_pb_in: list[Any] | None = None,
     ) -> dict[int, mx.array]:
         host, port = self._addresses[peer_shard_id]
         s = socket.create_connection((host, port), timeout=self._timeout_s)
@@ -111,6 +120,8 @@ class TcpPeerRPC:
             req.expert_request.h_spec.dtype = _mx_to_wire_dtype(h.dtype)
             req.expert_request.h_spec.quant = wire_pb2.QUANT_NONE
             req.expert_request.h_spec.byte_count = len(raw)
+            if provenance_pb_in:
+                req.expert_request.provenance.extend(provenance_pb_in)
             send_envelope(cast(BinaryIO, stream), req, raw)
             stream.flush()
 
@@ -126,6 +137,8 @@ class TcpPeerRPC:
                     f"{env.WhichOneof('payload')}"
                 )
             resp = env.expert_response
+            if provenance_pb_out is not None:
+                provenance_pb_out.extend(resp.provenance)
             stacked = bytes_to_tensor(
                 tensor,
                 shape=list(resp.outputs_spec.shape),
@@ -329,17 +342,29 @@ class ExpertOrchestrator:
         request_id: str,
         initial_local_ids: list[int],
         lm: Any,
+        provenance_chain: list[ProvenanceEntry] | None = None,
+        ar_hash: bytes | None = None,
     ) -> dict[int, mx.array]:
         """Run the peer fan-out with retries on ``ExpertRpcFailure``.
 
         Preserves partial outputs across retries: experts that already
         completed (in ``outputs``) are never re-dispatched. Each retry
         excludes peers that previously failed in THIS invocation.
+
+        ``provenance_chain`` and ``ar_hash`` are threaded through for Phase 6-B
+        provenance recording. When ``provenance_chain is None``, all provenance
+        code is inert.
         """
         import time as _time
 
         # ids we still need outputs for (local ids handled by caller).
         remote_ids_needed = [e for e in all_ids if e not in initial_local_ids]
+
+        # Build pb_prefix once from the current chain (snapshot before fan-out).
+        pb_prefix: list[Any] = []
+        if provenance_chain is not None:
+            from model_shard.provenance import entry_to_pb
+            pb_prefix = [entry_to_pb(e) for e in provenance_chain]
 
         # Initial routing.
         peer_loads = self.loads_provider()
@@ -360,10 +385,31 @@ class ExpertOrchestrator:
                 outputs.update(
                     run_selected_experts(lm, post_attn, layer_idx, local_ids_extra)
                 )
+            if provenance_chain is not None and ar_hash is not None:
+                from model_shard.provenance import build_entry
+                for eid in local_ids_extra:
+                    provenance_chain.append(
+                        build_entry(
+                            node_id=self.self_shard_id,
+                            op=OpDescriptor(
+                                op_type=OpType.OP_EXPERT,
+                                layer_idx=layer_idx,
+                                expert_id=eid,
+                            ),
+                            output_tensor=outputs[eid],
+                            parent_hashes=(ar_hash,),
+                        )
+                    )
+
+        # per-peer mutable lists to collect response provenance entries.
+        per_peer_response_pb: dict[str, list[Any]] = {peer: [] for peer in by_owner}
 
         futures: dict[str, Future[dict[int, mx.array]]] = {
             peer: self._executor.submit(
-                self.peer_rpc.call, peer, request_id, layer_idx, ids, post_attn
+                self.peer_rpc.call,
+                peer, request_id, layer_idx, ids, post_attn,
+                per_peer_response_pb[peer],  # provenance_pb_out
+                pb_prefix if pb_prefix else None,  # provenance_pb_in
             )
             for peer, ids in by_owner.items()
         }
@@ -387,6 +433,12 @@ class ExpertOrchestrator:
                     self._gather_with_abort(
                         futures, abort_events, outputs, layer_idx
                     )
+                    # Merge per-peer response provenance into main chain.
+                    if provenance_chain is not None:
+                        from model_shard.provenance import entry_from_pb
+                        for _peer, pbs in per_peer_response_pb.items():
+                            for pb in pbs:
+                                provenance_chain.append(entry_from_pb(pb))
                     break
                 except ExpertRpcFailure as exc:
                     if attempts >= self.retry_max_attempts:
@@ -405,6 +457,13 @@ class ExpertOrchestrator:
                         if peer != exc.failed_peer and fut.done():
                             with contextlib.suppress(Exception):
                                 outputs.update(fut.result())
+                    # Also merge response provenance from survivors.
+                    if provenance_chain is not None:
+                        from model_shard.provenance import entry_from_pb
+                        for _peer, pbs in per_peer_response_pb.items():
+                            if _peer != exc.failed_peer:
+                                for pb in pbs:
+                                    provenance_chain.append(entry_from_pb(pb))
 
                     missing = [e for e in remote_ids_needed if e not in outputs]
                     if not missing:
@@ -446,10 +505,28 @@ class ExpertOrchestrator:
                                     lm, post_attn, layer_idx, local_retry
                                 )
                             )
+                        if provenance_chain is not None and ar_hash is not None:
+                            from model_shard.provenance import build_entry
+                            for eid in local_retry:
+                                provenance_chain.append(
+                                    build_entry(
+                                        node_id=self.self_shard_id,
+                                        op=OpDescriptor(
+                                            op_type=OpType.OP_EXPERT,
+                                            layer_idx=layer_idx,
+                                            expert_id=eid,
+                                        ),
+                                        output_tensor=outputs[eid],
+                                        parent_hashes=(ar_hash,),
+                                    )
+                                )
+                    per_peer_response_pb = {peer: [] for peer in by_owner_retry}
                     futures = {
                         peer: self._executor.submit(
                             self.peer_rpc.call,
                             peer, request_id, layer_idx, ids, post_attn,
+                            per_peer_response_pb[peer],  # provenance_pb_out
+                            pb_prefix if pb_prefix else None,  # provenance_pb_in
                         )
                         for peer, ids in by_owner_retry.items()
                     }
@@ -475,12 +552,14 @@ class ExpertOrchestrator:
         cache: list[Any],
         masks: tuple[Any, Any],
         request_id: str,
+        provenance_chain: list[ProvenanceEntry] | None = None,
     ) -> mx.array:
         # Phase A — local MLX graph construction for attention, routing, the
         # shared expert, and any experts this shard owns. Guarded by
         # ``mlx_lock`` so peer-handler threads (running on the same Python
         # process in the in-process test fixture) cannot race the default MLX
         # stream with concurrent graph construction.
+        ar_hash: bytes | None = None
         with self._mlx_guard():
             post_attn, top_k_ids, top_k_weights = run_attention_and_route(
                 lm, h, layer_idx, cache, masks,
@@ -511,6 +590,43 @@ class ExpertOrchestrator:
             # default stream while our local graph is still being built.
             mx.eval(post_attn, shared_out, *local_outputs.values())
 
+            if provenance_chain is not None:
+                from model_shard.provenance import build_entry
+                prev_hash = provenance_chain[-1].hash if provenance_chain else b""
+                parent_hashes_ar: tuple[bytes, ...] = (prev_hash,) if prev_hash else ()
+                ar_entry = build_entry(
+                    node_id=self.self_shard_id,
+                    op=OpDescriptor(op_type=OpType.OP_ATTENTION_ROUTE, layer_idx=layer_idx),
+                    output_tensor=post_attn,
+                    parent_hashes=parent_hashes_ar,
+                )
+                provenance_chain.append(ar_entry)
+                shared_entry = build_entry(
+                    node_id=self.self_shard_id,
+                    op=OpDescriptor(op_type=OpType.OP_SHARED_EXPERT, layer_idx=layer_idx),
+                    output_tensor=shared_out,
+                    parent_hashes=(ar_entry.hash,),
+                )
+                provenance_chain.append(shared_entry)
+                ar_hash = ar_entry.hash
+
+        # Build OP_EXPERT entries for local_outputs (experts initially routed to self).
+        if provenance_chain is not None and ar_hash is not None:
+            from model_shard.provenance import build_entry
+            for eid, output in local_outputs.items():
+                provenance_chain.append(
+                    build_entry(
+                        node_id=self.self_shard_id,
+                        op=OpDescriptor(
+                            op_type=OpType.OP_EXPERT,
+                            layer_idx=layer_idx,
+                            expert_id=eid,
+                        ),
+                        output_tensor=output,
+                        parent_hashes=(ar_hash,),
+                    )
+                )
+
         # Phase B — peer fan-out with retry on peer failure.
         outputs: dict[int, mx.array] = dict(local_outputs)
         remote_outputs = self._phase_b_with_retry(
@@ -520,6 +636,8 @@ class ExpertOrchestrator:
             request_id=request_id,
             initial_local_ids=local_ids,
             lm=lm,
+            provenance_chain=provenance_chain,
+            ar_hash=ar_hash,
         )
         outputs.update(remote_outputs)
 
@@ -563,6 +681,25 @@ class ExpertOrchestrator:
             if layer.layer_scalar is not None:
                 out = out * layer.layer_scalar
             mx.eval(out)
+
+        # Phase C provenance: emit OP_AGGREGATE entry after aggregation.
+        if provenance_chain is not None:
+            split_entries = [
+                e for e in provenance_chain
+                if e.op is not None
+                and e.op.layer_idx == layer_idx
+                and e.op.op_type in (OpType.OP_SHARED_EXPERT, OpType.OP_EXPERT)
+            ]
+            parent_hashes_agg = tuple(e.hash for e in split_entries)
+            from model_shard.provenance import build_entry
+            agg_entry = build_entry(
+                node_id=self.self_shard_id,
+                op=OpDescriptor(op_type=OpType.OP_AGGREGATE, layer_idx=layer_idx),
+                output_tensor=out,
+                parent_hashes=parent_hashes_agg,
+            )
+            provenance_chain.append(agg_entry)
+
         return out
 
 

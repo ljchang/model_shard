@@ -67,6 +67,8 @@ class _FlakyPeerRPC:
         layer_idx: int,
         expert_ids: list[int],
         h: mx.array,
+        provenance_pb_out: list | None = None,
+        provenance_pb_in: list | None = None,
     ) -> dict[int, mx.array]:
         self.calls.append((peer_shard_id, list(expert_ids)))
         if peer_shard_id in self.fail_once_for and peer_shard_id not in self._already_failed:

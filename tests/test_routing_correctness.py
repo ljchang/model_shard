@@ -20,6 +20,8 @@ class _CountingRpc(PeerRPC):
     def call(
         self, peer_shard_id: str, request_id: str, layer_idx: int,
         expert_ids: list[int], h: mx.array,
+        provenance_pb_out: list | None = None,
+        provenance_pb_in: list | None = None,
     ) -> dict[int, mx.array]:
         self.calls.append((peer_shard_id, sorted(expert_ids)))
         # Return a zero tensor for every requested expert, same shape as h.
@@ -90,6 +92,8 @@ def test_multi_owner_orchestrator_picks_peer_when_self_overloaded(
         def call(
             self, peer_shard_id: str, request_id: str, layer_idx: int,
             expert_ids: list[int], h: mx.array,
+            provenance_pb_out: list | None = None,
+            provenance_pb_in: list | None = None,
         ) -> dict[int, mx.array]:
             for eid in expert_ids:
                 rpc_asked.append(int(eid))
