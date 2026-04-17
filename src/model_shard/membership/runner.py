@@ -29,6 +29,7 @@ from model_shard.membership.records import (
     HeatReportRecord,
     IncomingMessage,
     LoadReportRecord,
+    OwnershipDeltaRecord,
     PingMsg,
     PingReqAckMsg,
     PingReqMsg,
@@ -41,6 +42,14 @@ _LOG = logging.getLogger(__name__)
 
 
 _INTERNAL_QUEUE_MAX: Final[int] = 4096
+_DEFAULT_OWNERSHIP_TTL: Final[int] = 5
+
+
+@dataclasses.dataclass
+class _OutboundOwnership:
+    record: OwnershipDeltaRecord
+    ttl: int
+
 
 ObserverCallback = Callable[[StateTransition], None]
 
@@ -83,6 +92,11 @@ class MembershipRunner:
         self._heat_source: Callable[[], HeatReportRecord] | None = None
         self._peer_heat: dict[str, HeatReportRecord] = {}
         self._peer_heat_lock = threading.Lock()
+
+        self._outbound_ownership: list[_OutboundOwnership] = []
+        self._outbound_ownership_lock = threading.Lock()
+        self._ownership_seen: set[tuple[str, int, int]] = set()
+        self._ownership_seen_lock = threading.Lock()
 
         self._transport = UDPTransport(
             host=self_spec.host,
@@ -136,6 +150,42 @@ class MembershipRunner:
         with self._peer_heat_lock:
             return dict(self._peer_heat)
 
+    def announce_ownership_add(
+        self, layer_idx: int, expert_id: int, ttl: int = _DEFAULT_OWNERSHIP_TTL
+    ) -> None:
+        """Enqueue an ADD delta about self to piggyback for the next `ttl`
+        outbound ping-family messages. Also folds into ``ownership_view``
+        immediately so local readers see self-ownership without waiting."""
+        rec = OwnershipDeltaRecord(
+            shard_id=self._self_spec.shard_id,
+            layer_idx=layer_idx,
+            expert_id=expert_id,
+            action=0,
+            ts_unix_ms=int(time.time() * 1000),
+        )
+        with self._outbound_ownership_lock:
+            self._outbound_ownership.append(_OutboundOwnership(record=rec, ttl=ttl))
+        with self._ownership_seen_lock:
+            self._ownership_seen.add((rec.shard_id, rec.layer_idx, rec.expert_id))
+
+    def ownership_view(self) -> set[tuple[str, int, int]]:
+        """Snapshot of every (shard_id, layer_idx, expert_id) ADD ever
+        observed, including self-announcements."""
+        with self._ownership_seen_lock:
+            return set(self._ownership_seen)
+
+    def _drain_outbound_ownership(self) -> list[OwnershipDeltaRecord]:
+        """Return records to piggyback this round and decrement TTLs; evict
+        entries whose TTL reaches zero."""
+        with self._outbound_ownership_lock:
+            to_send = [o.record for o in self._outbound_ownership]
+            surviving: list[_OutboundOwnership] = []
+            for o in self._outbound_ownership:
+                if o.ttl > 1:
+                    surviving.append(_OutboundOwnership(record=o.record, ttl=o.ttl - 1))
+            self._outbound_ownership = surviving
+        return to_send
+
     @property
     def state(self) -> MembershipState:
         return self._state
@@ -161,6 +211,13 @@ class MembershipRunner:
             with self._peer_heat_lock:
                 for hr in heat:
                     self._peer_heat[hr.shard_id] = hr
+        ownership = getattr(decoded, "ownership", None)
+        if ownership:
+            with self._ownership_seen_lock:
+                for od in ownership:
+                    self._ownership_seen.add(
+                        (od.shard_id, od.layer_idx, od.expert_id)
+                    )
         try:
             self._inbox.put_nowait(decoded)
         except queue.Full:
@@ -228,6 +285,25 @@ class MembershipRunner:
                         else:
                             new_outgoing2.append(o)
                     outgoing = new_outgoing2
+
+            # TODO(phase5b): fuse loads + heat + ownership piggyback into a
+            # single outgoing-pass rewrite once Task 17 integrates the
+            # scanner. Three sequential walks is fine now but wasteful.
+            owner_batch = self._drain_outbound_ownership()
+            if owner_batch:
+                new_outgoing3 = []
+                for o in outgoing:
+                    p = o.payload
+                    if isinstance(p, (PingMsg, AckMsg, PingReqMsg, PingReqAckMsg)):
+                        new_payload = dataclasses.replace(
+                            p, ownership=[*p.ownership, *owner_batch]
+                        )
+                        new_outgoing3.append(
+                            dataclasses.replace(o, payload=new_payload)
+                        )
+                    else:
+                        new_outgoing3.append(o)
+                outgoing = new_outgoing3
 
             for o in outgoing:
                 addr = self._addr_by_id.get(o.target_shard_id)
