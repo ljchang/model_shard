@@ -6,6 +6,7 @@ and only tests marked `slow` depend on it.
 
 from __future__ import annotations
 
+import os
 import socket
 import threading
 import time
@@ -108,3 +109,88 @@ def three_node_pipeline(loaded_model: Any) -> Iterator[DistributedCluster]:
             n.shutdown()
         for t in threads:
             t.join(timeout=2.0)
+
+
+@pytest.fixture(scope="session")
+def three_node_pipeline_expert_split(
+    loaded_model: Any,
+) -> Iterator[DistributedCluster]:
+    """Session-scoped 3-node pipeline with layer 15's 128 experts split
+    round-robin across the three shards (Phase 3).
+
+    Sets ``ENABLE_EXPERT_SHARD=true`` in the environment BEFORE constructing
+    any ``Node``, so each node picks up the flag in its ``__init__``. Restores
+    the prior value on teardown so other fixtures / sessions are unaffected.
+
+    Uses its own set of free ports distinct from ``three_node_pipeline`` so
+    both can coexist at session scope without sharing any node state.
+    """
+    from model_shard.node import Node
+    from model_shard.shard_map import NodeAddress, ShardMap, ShardSpec
+
+    ports = [_find_free_port() for _ in range(3)]
+
+    def _ids_mod3(r: int) -> tuple[int, ...]:
+        return tuple(e for e in range(128) if e % 3 == r)
+
+    specs = [
+        ShardSpec(
+            shard_id="layer_0-10",
+            address=NodeAddress("127.0.0.1", ports[0]),
+            start_layer=0,
+            end_layer=10,
+            moe_experts={15: _ids_mod3(0)},
+        ),
+        ShardSpec(
+            shard_id="layer_10-20",
+            address=NodeAddress("127.0.0.1", ports[1]),
+            start_layer=10,
+            end_layer=20,
+            moe_experts={15: _ids_mod3(1)},
+        ),
+        ShardSpec(
+            shard_id="layer_20-30",
+            address=NodeAddress("127.0.0.1", ports[2]),
+            start_layer=20,
+            end_layer=30,
+            moe_experts={15: _ids_mod3(2)},
+        ),
+    ]
+    shard_map = ShardMap({s.shard_id: s for s in specs})
+
+    # Flip the Phase 3 gate BEFORE constructing any Node (the constructor
+    # reads this env var to decide whether to build an ExpertOrchestrator).
+    prev_flag = os.environ.get("ENABLE_EXPERT_SHARD")
+    os.environ["ENABLE_EXPERT_SHARD"] = "true"
+    try:
+        nodes = {
+            spec.shard_id: Node(
+                shard=spec,
+                shard_map=shard_map,
+                loaded_model=loaded_model,
+                total_layers=loaded_model.num_layers,
+            )
+            for spec in specs
+        }
+        threads = [
+            threading.Thread(target=n.serve_forever, daemon=True)
+            for n in nodes.values()
+        ]
+        for t in threads:
+            t.start()
+        for spec in specs:
+            _wait_for_listening(spec.address.host, spec.address.port)
+
+        try:
+            yield DistributedCluster(shard_map=shard_map, nodes_by_id=nodes)
+        finally:
+            for n in nodes.values():
+                n.shutdown()
+            for t in threads:
+                t.join(timeout=2.0)
+    finally:
+        # Restore the env var so other fixtures / tests see the default.
+        if prev_flag is None:
+            os.environ.pop("ENABLE_EXPERT_SHARD", None)
+        else:
+            os.environ["ENABLE_EXPERT_SHARD"] = prev_flag

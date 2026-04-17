@@ -40,6 +40,7 @@ import mlx.core as mx
 
 from model_shard._pb import wire_pb2
 from model_shard.envelope import recv_envelope, send_envelope
+from model_shard.expert_orchestrator import ExpertOrchestrator, TcpPeerRPC
 from model_shard.membership import MembershipRunner, PeerSpec, SwimConfig
 from model_shard.membership.records import StateTransition
 from model_shard.mlx_engine import (
@@ -56,6 +57,14 @@ from model_shard.shard_map import ShardMap, ShardSpec
 
 _LOG = logging.getLogger(__name__)
 _PROTOCOL_VERSION = 1
+
+# Process-wide MLX serialization lock. In production each node is its own
+# process, so this lock never contends. In the in-process test fixture we run
+# three nodes in a single Python process — concurrent MLX evaluations from
+# different threads on the shared LoadedModel can abort the Metal backend, so
+# we serialize the expert-RPC compute path (which is the only place multiple
+# node threads run MLX at the same time under Phase 3 expert splitting).
+_MLX_COMPUTE_LOCK = threading.Lock()
 
 
 @dataclass
@@ -99,6 +108,24 @@ class Node:
         if _gossip_enabled():
             self._membership = self._build_membership_runner()
 
+        # Phase 3 expert sharding. Construct an ``ExpertOrchestrator`` only on
+        # nodes whose layer range (i.e., whose attention) covers a split layer
+        # in ``self._shard.moe_experts``. Other nodes merely serve inbound
+        # ``ExpertRequest`` RPCs (see ``_handle_expert_request``); they do not
+        # need an orchestrator because they never run the attention for the
+        # split layer, only its experts on demand.
+        self._split_layers: set[int] = set()
+        self._orchestrator: ExpertOrchestrator | None = None
+        if _expert_shard_enabled() and self._shard.moe_experts:
+            my_split = {
+                layer_idx
+                for layer_idx in self._shard.moe_experts
+                if self._shard.start_layer <= layer_idx < self._shard.end_layer
+            }
+            if my_split:
+                self._split_layers = my_split
+                self._orchestrator = self._build_expert_orchestrator()
+
     # ------------------------------------------------------------------ roles
 
     @property
@@ -140,6 +167,8 @@ class Node:
         self._stopping.set()
         if self._membership is not None:
             self._membership.stop()
+        if self._orchestrator is not None:
+            self._orchestrator.close()
 
     def _handle_connection(self, conn: socket.socket) -> None:
         try:
@@ -216,7 +245,7 @@ class Node:
         prompt_tokens = list(req.prompt_token_ids)
         token_ids = mx.array([prompt_tokens])
         h = embed_tokens(self._lm, token_ids)
-        h = self._run_my_layers(h, cache)
+        h = self._run_my_layers(h, cache, request_id=req.request_id)
         self._forward_activation(req.request_id, h)
 
         # Decode loop. Blocks on the queue until the tail returns tokens.
@@ -246,7 +275,7 @@ class Node:
                 with self._state_lock:
                     cache = self._kv_caches[request_id]
                 h = embed_tokens(self._lm, mx.array([[token_id]]))
-                h = self._run_my_layers(h, cache)
+                h = self._run_my_layers(h, cache, request_id=request_id)
                 self._forward_activation(request_id, h)
 
             # Clean up everywhere.
@@ -281,7 +310,7 @@ class Node:
         h = bytes_to_tensor(
             tensor_bytes, shape=list(act.tensor.shape), dtype=act.tensor.dtype
         )
-        h = self._run_my_layers(h, cache)
+        h = self._run_my_layers(h, cache, request_id=act.request_id)
 
         if self.is_tail:
             logits = finalize(self._lm, h)
@@ -380,11 +409,20 @@ class Node:
         # run_selected_experts, mlx errors) must be reported as
         # Error{ERR_SHARD_UNAVAILABLE} so the caller fails fast instead of
         # waiting for TCP timeout. Matches the Phase 2 broken-pipe pattern.
+        #
+        # Acquire the process-wide MLX lock around evaluation so concurrent
+        # ExpertRequest handlers (possible when 3 in-process nodes share the
+        # default MLX stream in the test fixture) don't race on Metal.
         try:
-            outputs = run_selected_experts(self._lm, h, layer_idx, requested)
-            # Stack in request order so the caller can unstack by index.
-            stacked = mx.stack([outputs[eid] for eid in requested], axis=2)
-            raw = tensor_to_bytes(stacked)
+            with _MLX_COMPUTE_LOCK:
+                outputs = run_selected_experts(self._lm, h, layer_idx, requested)
+                # Stack in request order so the caller can unstack by index.
+                stacked = mx.stack([outputs[eid] for eid in requested], axis=2)
+                # Force realization before releasing the lock so the serialized
+                # bytes are based on fully-computed data (and no dangling graph
+                # refs cross threads).
+                mx.eval(stacked)
+                raw = tensor_to_bytes(stacked)
         except Exception as exc:  # noqa: BLE001 — intentional catch-all
             _LOG.exception("expert fan-out raised")
             _send_error(
@@ -408,7 +446,9 @@ class Node:
 
     # ------------------------------------------------------------ forwarding
 
-    def _run_my_layers(self, h: mx.array, cache: list[Any]) -> mx.array:
+    def _run_my_layers(
+        self, h: mx.array, cache: list[Any], request_id: str = ""
+    ) -> mx.array:
         global_mask, sliding_mask = make_masks(self._lm, h, cache)
         return run_layers(
             self._lm,
@@ -418,6 +458,9 @@ class Node:
             cache,
             global_mask,
             sliding_mask,
+            split_layers=self._split_layers,
+            orchestrator=self._orchestrator,
+            request_id=request_id,
         )
 
     def _forward_activation(self, request_id: str, h: mx.array) -> None:
@@ -505,6 +548,41 @@ class Node:
     @property
     def membership(self) -> MembershipRunner | None:
         return self._membership
+
+    def _build_expert_orchestrator(self) -> ExpertOrchestrator:
+        """Construct an ExpertOrchestrator that fans out to peers via TCP.
+
+        ``owners`` is the union of per-layer expert ownership across ALL split
+        layers this node attends. In Phase 3 only layer 15 is split so this is
+        effectively single-layer, but we build the union generically so future
+        multi-split-layer configs do not require another code change. The
+        orchestrator dispatches by layer_idx per call, so as long as every
+        split layer's owners map is represented the local/remote routing is
+        correct.
+        """
+        owners: dict[str, set[int]] = {}
+        for sid in self._shard_map.all_shards():
+            spec = self._shard_map.lookup(sid)
+            ids: set[int] = set()
+            for layer_idx in self._split_layers:
+                ids.update(spec.moe_experts.get(layer_idx, ()))
+            owners[sid] = ids
+
+        addresses = {
+            sid: (
+                self._shard_map.lookup(sid).address.host,
+                self._shard_map.lookup(sid).address.port,
+            )
+            for sid in self._shard_map.all_shards()
+            if sid != self._shard.shard_id
+        }
+        return ExpertOrchestrator(
+            self_shard_id=self._shard.shard_id,
+            owners=owners,
+            peer_rpc=TcpPeerRPC(addresses=addresses, timeout_s=30.0),
+            rpc_timeout_s=30.0,
+            mlx_lock=_MLX_COMPUTE_LOCK,
+        )
 
     def _build_membership_runner(self) -> MembershipRunner:
         self_spec = PeerSpec(
@@ -632,6 +710,12 @@ def _send_error(
 
 def _gossip_enabled() -> bool:
     return os.environ.get("ENABLE_GOSSIP", "true").lower() not in ("0", "false", "no")
+
+
+def _expert_shard_enabled() -> bool:
+    """Phase 3 expert sharding gate. Default OFF so Phase 1/2 tests are
+    unaffected; the Phase 3 fixture flips it on before constructing nodes."""
+    return os.environ.get("ENABLE_EXPERT_SHARD", "false").lower() in ("1", "true", "yes")
 
 
 __all__ = ["Node"]
