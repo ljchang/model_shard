@@ -105,6 +105,11 @@ class Node:
     ) -> None:
         self._shard = shard
         self._shard_map = shard_map
+        if _dynamic_migration_enabled() and not _partial_load_enabled():
+            raise ValueError(
+                "ENABLE_DYNAMIC_MIGRATION=true requires ENABLE_PARTIAL_LOAD=true "
+                "(see Phase 5b spec D16)"
+            )
         # Phase 5b: runtime expert ownership registry (see spec D9).
         # Seeded from the frozen ShardSpec at boot; mutated by migration attach.
         self._live_experts: dict[int, set[int]] = {
