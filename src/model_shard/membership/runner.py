@@ -101,6 +101,13 @@ class MembershipRunner:
         ] = {}
         self._ownership_seen_lock = threading.Lock()
 
+        # Callbacks invoked when ownership deltas arrive from gossip peers.
+        # Signature: (shard_id, layer_idx, expert_id, action, ts_unix_ms) -> None
+        self._ownership_observers: list[
+            Callable[[str, int, int, int, int], None]
+        ] = []
+        self._ownership_observers_lock = threading.Lock()
+
         self._transport = UDPTransport(
             host=self_spec.host,
             port=self_spec.udp_port,
@@ -152,6 +159,16 @@ class MembershipRunner:
         """Return a snapshot of the most recent heat report seen per peer."""
         with self._peer_heat_lock:
             return dict(self._peer_heat)
+
+    def register_ownership_observer(
+        self, callback: Callable[[str, int, int, int, int], None]
+    ) -> None:
+        """Register a callback invoked for each OwnershipDeltaRecord received
+        from a gossip peer (not for self-announced deltas). Signature:
+            callback(shard_id, layer_idx, expert_id, action, ts_unix_ms) -> None
+        Called from the transport thread; must be fast and non-blocking."""
+        with self._ownership_observers_lock:
+            self._ownership_observers.append(callback)
 
     def announce_ownership_add(
         self, layer_idx: int, expert_id: int, ttl: int = _DEFAULT_OWNERSHIP_TTL
@@ -247,12 +264,23 @@ class MembershipRunner:
                     self._peer_heat[hr.shard_id] = hr
         ownership = getattr(decoded, "ownership", None)
         if ownership:
+            applied: list[OwnershipDeltaRecord] = []
             with self._ownership_seen_lock:
                 for od in ownership:
                     key = (od.shard_id, od.layer_idx, od.expert_id)
                     existing = self._ownership_view_internal.get(key)
                     if existing is None or od.ts_unix_ms > existing[1]:
                         self._ownership_view_internal[key] = (od.action, od.ts_unix_ms)
+                        applied.append(od)
+            if applied:
+                with self._ownership_observers_lock:
+                    observers = list(self._ownership_observers)
+                for od in applied:
+                    for cb in observers:
+                        try:
+                            cb(od.shard_id, od.layer_idx, od.expert_id, od.action, od.ts_unix_ms)
+                        except Exception:
+                            _LOG.exception("ownership observer raised; suppressing")
         try:
             self._inbox.put_nowait(decoded)
         except queue.Full:

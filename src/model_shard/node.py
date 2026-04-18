@@ -1260,11 +1260,24 @@ class Node:
             for sid in self._shard_map.all_shards()
             if sid != self._shard.shard_id
         ]
-        return MembershipRunner(
+        runner = MembershipRunner(
             self_spec=self_spec,
             peers=peer_specs,
             config=SwimConfig(),
         )
+        # Bridge: relay gossip-received ownership deltas into our local
+        # _ownership_view_internal so that Node.owners_of() sees changes
+        # propagated via SWIM gossip (not just self-announcements).
+        runner.register_ownership_observer(self._on_gossip_ownership_delta)
+        return runner
+
+    def _on_gossip_ownership_delta(
+        self, shard_id: str, layer_idx: int, expert_id: int, action: int, ts_unix_ms: int
+    ) -> None:
+        """Called from MembershipRunner when a gossip peer's OwnershipDelta
+        is applied (i.e., it passed the LWW filter in the runner). Relay into
+        Node._ownership_view_internal so Node.owners_of() stays consistent."""
+        self._ownership_view_put(shard_id, layer_idx, expert_id, action=action, ts_unix_ms=ts_unix_ms)
 
     def _on_membership_change(self, transition: StateTransition) -> None:
         # Two concerns:
