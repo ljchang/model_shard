@@ -92,3 +92,54 @@ def test_attach_path_updates_live_experts_and_announces(monkeypatch):
     n.migration_attach(layer_idx=15, expert_id=7, tensors=new_tensors)
     assert 7 in n._live_experts[15]
     assert ("self", 15, 7) in n._ownership_seen
+
+
+def test_node_ownership_view_supports_remove():
+    """Phase 6-C: Node._ownership_view is a versioned dict; REMOVE supersedes ADD
+    by ts_unix_ms."""
+    import os
+    monkeypatch_env = {"ENABLE_GOSSIP": "false", "ENABLE_PARTIAL_LOAD": "false",
+                        "ENABLE_DYNAMIC_MIGRATION": "false"}
+    for k, v in monkeypatch_env.items():
+        os.environ[k] = v
+    try:
+        spec_a = _mk_spec("A", 31000, {15: (0, 3)})
+        spec_b = _mk_spec("B", 31001, {15: (3, 7)})
+        sm = ShardMap({"A": spec_a, "B": spec_b})
+        from unittest.mock import MagicMock
+        n = Node(shard=spec_a, shard_map=sm, loaded_model=MagicMock(), total_layers=30)
+        # Initial: B owns 3 (bootstrap).
+        assert "B" in n.owners_of(15, 3)
+        # Simulate B's REMOVE at a later timestamp.
+        n._ownership_view_put("B", 15, 3, action=1, ts_unix_ms=9_999_999_999_999)
+        assert "B" not in n.owners_of(15, 3)
+    finally:
+        for k in monkeypatch_env:
+            os.environ.pop(k, None)
+
+
+def test_node_ownership_view_put_last_writer_wins():
+    """Older ts_unix_ms must not supersede a newer entry."""
+    import os
+    monkeypatch_env = {"ENABLE_GOSSIP": "false", "ENABLE_PARTIAL_LOAD": "false",
+                        "ENABLE_DYNAMIC_MIGRATION": "false"}
+    for k, v in monkeypatch_env.items():
+        os.environ[k] = v
+    try:
+        spec_a = _mk_spec("A", 31002, {15: (0, 3)})
+        spec_b = _mk_spec("B", 31003, {15: (1, 4)})
+        sm = ShardMap({"A": spec_a, "B": spec_b})
+        from unittest.mock import MagicMock
+        n = Node(shard=spec_a, shard_map=sm, loaded_model=MagicMock(), total_layers=30)
+        # Set REMOVE at t=2000.
+        n._ownership_view_put("A", 15, 99, action=1, ts_unix_ms=2000)
+        assert "A" not in n.owners_of(15, 99)
+        # Stale ADD at t=1000 must be dropped.
+        n._ownership_view_put("A", 15, 99, action=0, ts_unix_ms=1000)
+        assert "A" not in n.owners_of(15, 99)
+        # Newer ADD at t=3000 supersedes.
+        n._ownership_view_put("A", 15, 99, action=0, ts_unix_ms=3000)
+        assert "A" in n.owners_of(15, 99)
+    finally:
+        for k in monkeypatch_env:
+            os.environ.pop(k, None)

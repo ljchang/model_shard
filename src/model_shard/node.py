@@ -117,14 +117,18 @@ class Node:
         self._live_experts: dict[int, set[int]] = {
             layer: set(ids) for layer, ids in shard.moe_experts.items()
         }
-        # Union of bootstrap moe_experts across ALL shards + received
-        # OwnershipDelta ADDs (see spec D10).
-        self._ownership_seen: set[tuple[str, int, int]] = set()
+        # Phase 6-C: versioned ownership view (ADD/REMOVE via last-writer-wins
+        # on ts_unix_ms). Dict key = (shard_id, layer_idx, expert_id),
+        # value = (action, ts_unix_ms). Bootstrap ADDs seeded at ts=0 so any
+        # later real gossip supersedes.
+        self._ownership_view_internal: dict[
+            tuple[str, int, int], tuple[int, int]
+        ] = {}
         for sid in shard_map.all_shards():
             peer_spec = shard_map.lookup(sid)
             for layer, ids in peer_spec.moe_experts.items():
                 for eid in ids:
-                    self._ownership_seen.add((sid, layer, eid))
+                    self._ownership_view_internal[(sid, layer, eid)] = (0, 0)
         self._ownership_seen_lock = threading.Lock()
         self._live_experts_lock = threading.Lock()
 
@@ -1043,15 +1047,42 @@ class Node:
             return set()
         return set(spec.moe_experts.keys())
 
+    @property
+    def _ownership_seen(self) -> set[tuple[str, int, int]]:
+        """Backward-compat shim: return a set of (shard_id, layer, eid) for
+        all entries whose latest action is ADD (action==0). Existing Phase 5b
+        tests check membership in this set; internal code uses
+        ``_ownership_view_internal`` directly."""
+        with self._ownership_seen_lock:
+            return {
+                key for key, (action, _) in self._ownership_view_internal.items()
+                if action == 0
+            }
+
+    def _ownership_view_put(
+        self, shard_id: str, layer_idx: int, expert_id: int,
+        *, action: int, ts_unix_ms: int,
+    ) -> None:
+        """Apply an OwnershipDelta via last-writer-wins. Used by gossip
+        ingestion (when added in Task 6 via subscribing to the MembershipRunner),
+        and by migration_attach/detach to update self-ownership synchronously
+        before gossip propagates."""
+        key = (shard_id, layer_idx, expert_id)
+        with self._ownership_seen_lock:
+            existing = self._ownership_view_internal.get(key)
+            if existing is None or ts_unix_ms > existing[1]:
+                self._ownership_view_internal[key] = (action, ts_unix_ms)
+
     def owners_of(self, layer_idx: int, expert_id: int) -> set[str]:
         """Return the current live owner set for (layer_idx, expert_id).
 
-        Union of bootstrap ShardSpec.moe_experts and gossip-observed ADDs.
-        Used by ExpertOrchestrator.live_owners_provider in Phase 5b."""
+        Returns only shards whose latest observed action is ADD; REMOVEs
+        are excluded. Used by ExpertOrchestrator.live_owners_provider in
+        Phase 5b+ and by Phase 6-B provenance validation."""
         with self._ownership_seen_lock:
             return {
-                sid for (sid, lyr, eid) in self._ownership_seen
-                if lyr == layer_idx and eid == expert_id
+                sid for (sid, L, e), (action, _) in self._ownership_view_internal.items()
+                if layer_idx == L and expert_id == e and action == 0
             }
 
     def migration_attach(
@@ -1064,8 +1095,10 @@ class Node:
         )
         with self._live_experts_lock:
             self._live_experts.setdefault(layer_idx, set()).add(expert_id)
-        with self._ownership_seen_lock:
-            self._ownership_seen.add((self._shard.shard_id, layer_idx, expert_id))
+        self._ownership_view_put(
+            self._shard.shard_id, layer_idx, expert_id,
+            action=0, ts_unix_ms=int(time.time() * 1000),
+        )
         if self._membership is not None:
             self._membership.announce_ownership_add(layer_idx, expert_id)
 
