@@ -731,7 +731,12 @@ class Node:
             )
             return
 
-        hosted = set(self._shard.moe_experts.get(layer_idx, ()))
+        # Phase 6-C: authority shifts from bootstrap moe_experts to the
+        # runtime _live_experts set. This allows serving migration-attached
+        # experts AND correctly rejecting evicted experts. Also fixes a latent
+        # 5b-era bug where migration-attached experts were falsely rejected.
+        with self._live_experts_lock:
+            hosted = set(self._live_experts.get(layer_idx, set()))
         missing = [eid for eid in requested if eid not in hosted]
         if missing:
             _send_error(
