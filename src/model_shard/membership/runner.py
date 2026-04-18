@@ -96,7 +96,9 @@ class MembershipRunner:
 
         self._outbound_ownership: list[_OutboundOwnership] = []
         self._outbound_ownership_lock = threading.Lock()
-        self._ownership_seen: set[tuple[str, int, int]] = set()
+        self._ownership_view_internal: dict[
+            tuple[str, int, int], tuple[int, int]
+        ] = {}
         self._ownership_seen_lock = threading.Lock()
 
         self._transport = UDPTransport(
@@ -167,13 +169,44 @@ class MembershipRunner:
         with self._outbound_ownership_lock:
             self._outbound_ownership.append(_OutboundOwnership(record=rec, ttl=ttl))
         with self._ownership_seen_lock:
-            self._ownership_seen.add((rec.shard_id, rec.layer_idx, rec.expert_id))
+            key = (rec.shard_id, rec.layer_idx, rec.expert_id)
+            existing = self._ownership_view_internal.get(key)
+            if existing is None or rec.ts_unix_ms > existing[1]:
+                self._ownership_view_internal[key] = (rec.action, rec.ts_unix_ms)
+
+    def announce_ownership_remove(
+        self, layer_idx: int, expert_id: int, ttl: int = _DEFAULT_OWNERSHIP_TTL
+    ) -> None:
+        """Gossip an OwnershipDelta{action=REMOVE}. Symmetric to
+        announce_ownership_add. Updates the local view immediately via
+        last-writer-wins on ts_unix_ms."""
+        with self._ownership_seen_lock:
+            key = (self._self_spec.shard_id, layer_idx, expert_id)
+            existing = self._ownership_view_internal.get(key)
+            # Ensure the REMOVE timestamp strictly exceeds any existing ADD so
+            # that same-millisecond add→remove sequences converge correctly.
+            existing_ts = existing[1] if existing is not None else 0
+            ts = max(int(time.time() * 1000), existing_ts + 1)
+            rec = OwnershipDeltaRecord(
+                shard_id=self._self_spec.shard_id,
+                layer_idx=layer_idx,
+                expert_id=expert_id,
+                action=1,
+                ts_unix_ms=ts,
+            )
+            self._ownership_view_internal[key] = (rec.action, rec.ts_unix_ms)
+        with self._outbound_ownership_lock:
+            self._outbound_ownership.append(_OutboundOwnership(record=rec, ttl=ttl))
 
     def ownership_view(self) -> set[tuple[str, int, int]]:
-        """Snapshot of every (shard_id, layer_idx, expert_id) ADD ever
-        observed, including self-announcements."""
+        """Snapshot of every (shard_id, layer_idx, expert_id) whose latest
+        observed action is ADD. REMOVE entries are excluded; stale ADDs
+        superseded by a newer REMOVE are also excluded."""
         with self._ownership_seen_lock:
-            return set(self._ownership_seen)
+            return {
+                key for key, (action, _) in self._ownership_view_internal.items()
+                if action == 0
+            }
 
     def _drain_outbound_ownership(self) -> list[OwnershipDeltaRecord]:
         """Return records to piggyback this round and decrement TTLs; evict
@@ -216,9 +249,10 @@ class MembershipRunner:
         if ownership:
             with self._ownership_seen_lock:
                 for od in ownership:
-                    self._ownership_seen.add(
-                        (od.shard_id, od.layer_idx, od.expert_id)
-                    )
+                    key = (od.shard_id, od.layer_idx, od.expert_id)
+                    existing = self._ownership_view_internal.get(key)
+                    if existing is None or od.ts_unix_ms > existing[1]:
+                        self._ownership_view_internal[key] = (od.action, od.ts_unix_ms)
         try:
             self._inbox.put_nowait(decoded)
         except queue.Full:
