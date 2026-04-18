@@ -67,7 +67,7 @@ from model_shard.mlx_engine import (
     run_layers,
     tensor_to_bytes,
 )
-from model_shard.partial_load import attach_expert, slice_expert
+from model_shard.partial_load import attach_expert, detach_expert, slice_expert
 from model_shard.request import ProvenanceEntry
 from model_shard.shard_map import ShardMap, ShardSpec
 
@@ -79,6 +79,12 @@ _POISON_TOKEN: int = -1
 class PeerLeftAliveError(RuntimeError):
     """Raised inside _drive_decode_loop when the membership observer
     poisons the token queue because a peer left ALIVE mid-decode."""
+
+
+class LastReplicaError(RuntimeError):
+    """Raised by Node.migration_detach when evicting would leave no other
+    live owner for the (layer, expert). The scanner's eviction pass catches
+    this and skips the victim."""
 
 # Process-wide MLX serialization lock. In production each node is its own
 # process, so this lock never contends. In the in-process test fixture we run
@@ -131,6 +137,9 @@ class Node:
                     self._ownership_view_internal[(sid, layer, eid)] = (0, 0)
         self._ownership_seen_lock = threading.Lock()
         self._live_experts_lock = threading.Lock()
+        # Phase 6-C: track attach timestamp per (layer, expert) so eviction
+        # can enforce MIGRATION_EVICT_COOLDOWN_SECONDS.
+        self._live_experts_attach_ts: dict[tuple[int, int], float] = {}
 
         # Phase 5b: per-node heat tracker for routing-count EMA.
         self._heat_tracker = HeatTracker()
@@ -1095,12 +1104,61 @@ class Node:
         )
         with self._live_experts_lock:
             self._live_experts.setdefault(layer_idx, set()).add(expert_id)
+            self._live_experts_attach_ts[(layer_idx, expert_id)] = time.time()
         self._ownership_view_put(
             self._shard.shard_id, layer_idx, expert_id,
             action=0, ts_unix_ms=int(time.time() * 1000),
         )
         if self._membership is not None:
             self._membership.announce_ownership_add(layer_idx, expert_id)
+
+    def migration_detach(self, layer_idx: int, expert_id: int) -> None:
+        """Evict (layer_idx, expert_id) from this node's compact stack.
+
+        Safety invariants (raise before any state mutation):
+          * Must be bootstrap-absent (not in self.shard.moe_experts[layer]).
+          * Must be past MIGRATION_EVICT_COOLDOWN_SECONDS since attach.
+          * Must have at least one other live owner (prevents last-replica loss).
+
+        On success:
+          1. Detach from the compact stack via partial_load.detach_expert.
+          2. Remove from self._live_experts + _live_experts_attach_ts.
+          3. Write REMOVE into self._ownership_view_internal via LWW.
+          4. Gossip via self._membership.announce_ownership_remove (if gossip active).
+        """
+        # Bootstrap guard.
+        bootstrap = self._shard.moe_experts.get(layer_idx, ())
+        if expert_id in bootstrap:
+            raise ValueError(
+                f"cannot evict bootstrap-held expert {expert_id} at layer {layer_idx} "
+                f"(in shard {self._shard.shard_id!r}'s moe_experts)"
+            )
+        # Cooldown guard.
+        cooldown_s = _migration_evict_cooldown_s()
+        attach_ts = self._live_experts_attach_ts.get((layer_idx, expert_id), 0.0)
+        if time.time() - attach_ts < cooldown_s:
+            raise ValueError(
+                f"cannot evict expert {expert_id} at layer {layer_idx}: "
+                f"cooldown {cooldown_s}s (MIGRATION_EVICT_COOLDOWN_SECONDS) not yet elapsed"
+            )
+        # Last-replica guard.
+        other_owners = self.owners_of(layer_idx, expert_id) - {self._shard.shard_id}
+        if not other_owners:
+            raise LastReplicaError(
+                f"refusing to evict expert {expert_id} at layer {layer_idx}: "
+                f"no other live owners"
+            )
+        # Safe to proceed.
+        detach_expert(self._lm, layer_idx, expert_id, _MLX_COMPUTE_LOCK)
+        with self._live_experts_lock:
+            self._live_experts.get(layer_idx, set()).discard(expert_id)
+            self._live_experts_attach_ts.pop((layer_idx, expert_id), None)
+        self._ownership_view_put(
+            self._shard.shard_id, layer_idx, expert_id,
+            action=1, ts_unix_ms=int(time.time() * 1000),
+        )
+        if self._membership is not None:
+            self._membership.announce_ownership_remove(layer_idx, expert_id)
 
     def _loads_snapshot(self) -> dict[str, int]:
         """Current peer loads from gossip, used by MigrationScanner to pick
@@ -1371,6 +1429,10 @@ def _migration_max_experts_per_layer() -> int:
     return int(os.environ.get("MIGRATION_MAX_EXPERTS_PER_LAYER", "128"))
 
 
+def _migration_evict_cooldown_s() -> float:
+    return float(os.environ.get("MIGRATION_EVICT_COOLDOWN_SECONDS", "30.0"))
+
+
 def _provenance_enabled() -> bool:
     """Phase 6-B provenance chain gate. Default OFF so all prior tests are
     unaffected. When ON, Node embeds provenance entries into Activation
@@ -1378,4 +1440,4 @@ def _provenance_enabled() -> bool:
     return os.environ.get("ENABLE_PROVENANCE", "false").lower() in ("1", "true", "yes")
 
 
-__all__ = ["Node", "PeerLeftAliveError"]
+__all__ = ["LastReplicaError", "Node", "PeerLeftAliveError"]
