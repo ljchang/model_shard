@@ -103,6 +103,54 @@ Phase 6 decomposes into three independent sub-projects: 6-A (retry, this), 6-B
 (provenance verification), and 6-C (eviction + REMOVE OwnershipDelta). See
 `docs/superpowers/specs/2026-04-17-phase6a-expert-retry-design.md`.
 
+## Phase 6-C status: Expert Eviction — complete
+
+A node can now evict migration-added experts under capacity pressure via
+`OwnershipDelta{REMOVE}` gossip with last-writer-wins convergence on
+`ts_unix_ms`. Gate: `ENABLE_EVICTION=true` (default on). Knob:
+`MIGRATION_EVICT_COOLDOWN_SECONDS=30`.
+
+`detach_expert` is the inverse of Phase 5b's `attach_expert`: it shrinks
+the compact stacked tensor via a complementary-index `mx.take` under
+`_MLX_COMPUTE_LOCK`, so tensor mutation is serialized with any in-flight
+`ExpertRequest`. `MigrationScanner._maybe_evict_one` runs after the pull
+pass under the same single-in-flight lock, fires only at capacity, and
+selects the coldest-heat migration-added expert as the eviction victim.
+
+Safety invariants: bootstrap-held experts are never evicted; a last-replica
+local check refuses eviction if no other live owner is known; the 30-second
+attach cooldown prevents attach/evict oscillation; compute-lock
+serialization prevents tensor mutation under an in-flight compute.
+
+Phase 5b's `_ownership_seen: set` (ADD-only) was promoted to
+`_ownership_view_internal: dict[(shard, L, E), (action, ts_unix_ms)]` with
+last-writer-wins convergence. The `owners_of()` contract is preserved — it
+still returns the set of ADD shard_ids visible to callers.
+
+Significant carry-forward bug fix discovered during Task 7 E2E: `Node.owners_of`
+was disconnected from `MembershipRunner` gossip — only bootstrap and
+self-announcements were visible; peer-announced deltas never reached the
+node's ownership view. Fixed with an observer pattern:
+`MembershipRunner.register_ownership_observer` fires callbacks after each
+LWW acceptance, and `Node._on_gossip_ownership_delta` applies them via its
+own LWW. This corrects a latent Phase 5b/6-A/6-B bug in which multi-node
+ownership gossip was effectively invisible to `ExpertOrchestrator`
+live-routing, Phase 6-A retry exclusion, and Phase 6-B provenance
+authorization. A companion latent fix: `_handle_expert_request` now
+consults `_live_experts` (runtime) rather than `self._shard.moe_experts`
+(bootstrap), so migration-attached experts are served correctly and evicted
+experts correctly return `ERR_WRONG_SHARD`.
+
+Correctness proofs: `tests/test_partial_load_detach.py` (attach→detach
+roundtrip byte-identical); `tests/test_ownership_view_convergence.py`
+(ADD/REMOVE LWW convergence); `tests/test_eviction_e2e.py` (3-node cluster
+attach+evict cycle with gossip convergence); and
+`tests/test_eviction_race_with_expert_request.py` (post-eviction
+`ExpertRequest` returns `ERR_WRONG_SHARD`). Non-goals: quorum last-replica,
+two-phase tentative eviction, memory-pressure probing — Phase 7+. Phase 6
+trilogy complete: 6-A retry, 6-B provenance, 6-C eviction all shipped. See
+`docs/superpowers/specs/2026-04-18-phase6c-eviction-design.md`.
+
 ## Phase 6-B status: Provenance Verification — complete
 
 Every forward pass now carries a hash-chained DAG of `ProvenanceEntry` records that

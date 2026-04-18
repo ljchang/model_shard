@@ -47,7 +47,7 @@ def test_evicted_expert_serves_wrong_shard_error(monkeypatch):
     ids = sm_yaml.all_shards()
     ports = [_find_free_port() for _ in ids]
     specs = []
-    for sid, port in zip(ids, ports):
+    for sid, port in zip(ids, ports, strict=True):
         s = sm_yaml.lookup(sid)
         specs.append(
             ShardSpec(
@@ -58,7 +58,8 @@ def test_evicted_expert_serves_wrong_shard_error(monkeypatch):
     sm = ShardMap({s.shard_id: s for s in specs})
     nodes = [Node(shard=s, shard_map=sm, total_layers=30) for s in specs]
     threads = [threading.Thread(target=n.serve_forever, daemon=True) for n in nodes]
-    for t in threads: t.start()
+    for t in threads:
+        t.start()
     time.sleep(3.0)
 
     try:
@@ -93,7 +94,7 @@ def test_evicted_expert_serves_wrong_shard_error(monkeypatch):
         )
         hidden = 2816  # Gemma 4 26B hidden_size.
         h = mx.zeros((1, 1, hidden), dtype=mx.bfloat16)
-        with pytest.raises(RuntimeError, match="(WRONG_SHARD|not hosted|wrong shard|not held|does not host)"):
+        with pytest.raises(RuntimeError, match=r"(WRONG_SHARD|not hosted|wrong shard|not held|does not host)"):
             direct_rpc.call(
                 peer_shard_id=head._shard.shard_id,
                 request_id="r-post-evict",
@@ -102,6 +103,6 @@ def test_evicted_expert_serves_wrong_shard_error(monkeypatch):
                 h=h,
             )
     finally:
-        for n, th in zip(nodes, threads):
+        for n, th in zip(nodes, threads, strict=True):
             n.shutdown()
             th.join(timeout=3.0)

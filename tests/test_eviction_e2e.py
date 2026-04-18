@@ -39,7 +39,7 @@ def test_full_attach_evict_cycle_converges(monkeypatch):
     ids = sm_yaml.all_shards()
     ports = [_find_free_port() for _ in ids]
     specs = []
-    for sid, port in zip(ids, ports):
+    for sid, port in zip(ids, ports, strict=True):
         s = sm_yaml.lookup(sid)
         specs.append(
             ShardSpec(
@@ -53,7 +53,8 @@ def test_full_attach_evict_cycle_converges(monkeypatch):
 
     nodes = [Node(shard=s, shard_map=sm, total_layers=30) for s in specs]
     threads = [threading.Thread(target=n.serve_forever, daemon=True) for n in nodes]
-    for t in threads: t.start()
+    for t in threads:
+        t.start()
     time.sleep(3.0)  # SWIM stabilization
 
     try:
@@ -105,6 +106,6 @@ def test_full_attach_evict_cycle_converges(monkeypatch):
             f"{[n.owners_of(15, target_expert) for n in nodes[1:]]}"
         )
     finally:
-        for n, th in zip(nodes, threads):
+        for n, th in zip(nodes, threads, strict=True):
             n.shutdown()
             th.join(timeout=3.0)
