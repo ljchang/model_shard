@@ -183,4 +183,62 @@ def attach_expert(
         mx.eval(*realized)
 
 
-__all__ = ["_slice_stacked_by_axis0", "attach_expert", "load_model_partial", "slice_expert"]
+def detach_expert(
+    lm: LoadedModel,
+    layer_idx: int,
+    expert_id: int,
+    mlx_lock: threading.Lock,
+) -> None:
+    """Shrink the compact stack at ``layer_idx`` by removing one expert.
+
+    Inverse of ``attach_expert``. Uses complementary-index ``mx.take`` to
+    rebuild each of the 9 projection tensors without the evicted row, and
+    updates ``lm.held_ids_per_layer[layer_idx]`` accordingly.
+
+    Invariants:
+      * ``layer_idx`` must be present in ``lm.held_ids_per_layer``.
+      * ``expert_id`` must currently be held at that layer.
+    Raises ``KeyError`` on violation.
+
+    Under ``mlx_lock``:
+      1. For each (proj, attr), compute surviving local slots and rebuild
+         via ``mx.take(proj.<attr>, mx.array(surviving), axis=0)``.
+      2. Replace ``held_ids_per_layer[layer_idx]`` with the tuple minus the
+         evicted expert_id.
+      3. ``mx.eval`` the 9 new tensors to force realization.
+    """
+    held = lm.held_ids_per_layer.get(layer_idx)
+    if held is None:
+        raise KeyError(
+            f"layer {layer_idx} has no held expert list"
+        )
+    if expert_id not in held:
+        raise KeyError(
+            f"expert {expert_id} not held at layer {layer_idx} "
+            f"(held ids: {held})"
+        )
+    surviving_slots = [i for i, eid in enumerate(held) if eid != expert_id]
+    layer = lm.text_model.layers[layer_idx]
+    switch_glu = layer.experts.switch_glu
+    with mlx_lock:
+        idx = mx.array(surviving_slots)
+        realized: list[mx.array] = []
+        for proj_name, attr in _PROJ_ATTR_ORDER:
+            proj = getattr(switch_glu, proj_name)
+            current = getattr(proj, attr)
+            shrunk = mx.take(current, idx, axis=0)
+            setattr(proj, attr, shrunk)
+            realized.append(shrunk)
+        lm.held_ids_per_layer[layer_idx] = tuple(
+            e for e in held if e != expert_id
+        )
+        mx.eval(*realized)
+
+
+__all__ = [
+    "_slice_stacked_by_axis0",
+    "attach_expert",
+    "detach_expert",
+    "load_model_partial",
+    "slice_expert",
+]
