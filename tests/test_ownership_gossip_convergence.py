@@ -14,16 +14,26 @@ pytestmark = pytest.mark.slow
 
 
 def _free_port() -> int:
-    """Return a free TCP port in [1024, 64535] so that udp_port = port+1000
-    stays within the valid 0-65535 range (see ShardSpec.udp_port)."""
-    for _ in range(100):
-        s = _sk.socket()
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-        s.close()
-        if port <= 64535:
+    """Return a free TCP port in [20000, 50000] so that udp_port = port+1000
+    stays within the valid 0-65535 range (see ShardSpec.udp_port).
+
+    We cannot rely on the OS ephemeral range (port=0) because on some macOS
+    hosts the ephemeral range starts above 64535, which violates the
+    udp_port = tcp_port + 1000 constraint.
+    """
+    import random
+    rng = random.Random()
+    for _ in range(200):
+        port = rng.randint(20000, 50000)
+        try:
+            s = _sk.socket()
+            s.setsockopt(_sk.SOL_SOCKET, _sk.SO_REUSEADDR, 1)
+            s.bind(("127.0.0.1", port))
+            s.close()
             return port
-    raise RuntimeError("could not find a port <= 64535 after 100 tries")
+        except OSError:
+            continue
+    raise RuntimeError("could not find a free port in [20000, 50000] after 200 tries")
 
 
 @pytest.fixture
@@ -54,8 +64,10 @@ def test_ownership_delta_propagates_within_three_rounds(gossip_env):
         time.sleep(2.0)
         # Fake a local attach on n0 for expert 42.
         nodes[0]._live_experts.setdefault(15, set()).add(42)
-        with nodes[0]._ownership_seen_lock:
-            nodes[0]._ownership_seen.add((nodes[0]._shard.shard_id, 15, 42))
+        nodes[0]._ownership_view_put(
+            nodes[0]._shard.shard_id, 15, 42,
+            action=0, ts_unix_ms=int(time.time() * 1000),
+        )
         nodes[0]._membership.announce_ownership_add(15, 42)
 
         # Wait up to 6s for gossip propagation.

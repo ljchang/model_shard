@@ -71,5 +71,12 @@ class HeatTracker:
                 (int(layer_idx), int(expert_id)), 0.0
             ) * 100.0)
 
+    def reset(self, layer_idx: int, expert_id: int) -> None:
+        """Drop the tracked EMA for (layer_idx, expert_id). Used by the
+        eviction path to prevent a just-evicted hot expert from being
+        immediately re-pulled on the next scanner tick."""
+        with self._lock:
+            self._ema.pop((int(layer_idx), int(expert_id)), None)
+
 
 __all__ = ["HeatTracker"]

@@ -1070,13 +1070,16 @@ class Node:
 
     @property
     def _ownership_seen(self) -> set[tuple[str, int, int]]:
-        """Backward-compat shim: return a set of (shard_id, layer, eid) for
-        all entries whose latest action is ADD (action==0). Existing Phase 5b
-        tests check membership in this set; internal code uses
-        ``_ownership_view_internal`` directly."""
+        """Backward-compat snapshot of the current ADD-ownership set.
+
+        **Warning:** this returns a FRESH SET on each call. Mutations to the
+        returned value (e.g., ``.add(...)``, ``.remove(...)``) are discarded.
+        To mutate ownership, use ``_ownership_view_put(action=0|1, ts_unix_ms=...)``.
+        """
         with self._ownership_seen_lock:
             return {
-                key for key, (action, _) in self._ownership_view_internal.items()
+                (sid, L, e)
+                for (sid, L, e), (action, _) in self._ownership_view_internal.items()
                 if action == 0
             }
 
@@ -1165,6 +1168,7 @@ class Node:
         with self._live_experts_lock:
             self._live_experts.get(layer_idx, set()).discard(expert_id)
             self._live_experts_attach_ts.pop((layer_idx, expert_id), None)
+        self._heat_tracker.reset(layer_idx, expert_id)
         self._ownership_view_put(
             self._shard.shard_id, layer_idx, expert_id,
             action=1, ts_unix_ms=int(time.time() * 1000),

@@ -135,3 +135,23 @@ def test_migration_attach_records_ts():
     t_after = time.time()
     assert (15, 42) in n._live_experts_attach_ts
     assert t_before <= n._live_experts_attach_ts[(15, 42)] <= t_after
+
+
+def test_migration_detach_resets_heat():
+    """After eviction, the evicted expert's heat EMA must be reset so the
+    scanner doesn't immediately re-pull it."""
+    spec = _mk_spec("self", 31200, {15: (0, 3)})
+    spec_peer = _mk_spec("peer", 31201, {15: (42, 7)})
+    sm = ShardMap({"self": spec, "peer": spec_peer})
+    lm = _fake_lm_for_layer(15, (0, 3, 42))
+    n = Node(shard=spec, shard_map=sm, loaded_model=lm, total_layers=30)
+    n._live_experts[15].add(42)
+    n._live_experts_attach_ts[(15, 42)] = 0.0
+    n._ownership_view_put("peer", 15, 42, action=0, ts_unix_ms=1_000_000)
+    # Seed heat for expert 42.
+    n._heat_tracker.observe(15, [42, 42, 42])
+    assert n._heat_tracker.local_heat(15, 42) > 0
+    # Evict.
+    n.migration_detach(15, 42)
+    # Heat for the evicted expert must be reset.
+    assert n._heat_tracker.local_heat(15, 42) == 0
