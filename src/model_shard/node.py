@@ -222,6 +222,8 @@ class Node:
                 scan_interval_s=_migration_scan_interval_s(),
                 heat_threshold=_migration_heat_threshold(),
                 max_experts_per_layer=_migration_max_experts_per_layer(),
+                evict_cooldown_s=_migration_evict_cooldown_s(),
+                eviction_enabled=_eviction_enabled(),
             )
             addresses = {
                 sid: (
@@ -252,6 +254,11 @@ class Node:
                     if self._membership is not None
                     else (lambda lyr, e: None)
                 ),
+                bootstrap_held={
+                    lyr: set(ids) for lyr, ids in shard.moe_experts.items()
+                },
+                attach_ts_provider=lambda lyr, eid: self._live_experts_attach_ts.get((lyr, eid), 0.0),
+                evict_fn=self.migration_detach,
             )
 
         # Phase 3 expert sharding. Construct an ``ExpertOrchestrator`` only on
@@ -1443,6 +1450,10 @@ def _provenance_enabled() -> bool:
     unaffected. When ON, Node embeds provenance entries into Activation
     messages and validates inbound chains."""
     return os.environ.get("ENABLE_PROVENANCE", "false").lower() in ("1", "true", "yes")
+
+
+def _eviction_enabled() -> bool:
+    return os.environ.get("ENABLE_EVICTION", "true").lower() in ("1", "true", "yes")
 
 
 __all__ = ["LastReplicaError", "Node", "PeerLeftAliveError"]

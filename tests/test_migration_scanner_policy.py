@@ -39,6 +39,8 @@ def _make_scanner(
             scan_interval_s=0.0,
             heat_threshold=50,
             max_experts_per_layer=128,
+            evict_cooldown_s=0.0,
+            eviction_enabled=False,  # disable eviction for pull-only tests
         ),
         heat_tracker=ht,
         live_experts=live,
@@ -47,6 +49,9 @@ def _make_scanner(
         peer_rpc=peer_rpc,
         attacher=attacher,
         ownership_announcer=announce,
+        bootstrap_held={},
+        attach_ts_provider=lambda lyr, eid: 0.0,
+        evict_fn=lambda lyr, eid: None,
     )
 
 
@@ -83,6 +88,7 @@ def test_scan_once_respects_max_experts_per_layer():
         self_shard_id="self",
         policy=MigrationPolicy(
             scan_interval_s=0.0, heat_threshold=50, max_experts_per_layer=128,
+            evict_cooldown_s=0.0, eviction_enabled=False,
         ),
         heat_tracker=MagicMock(
             report=MagicMock(return_value=[(15, 128, 5000)]),
@@ -94,6 +100,9 @@ def test_scan_once_respects_max_experts_per_layer():
         peer_rpc=MagicMock(),
         attacher=lambda layer, e, t: None,
         ownership_announcer=lambda layer, e: None,
+        bootstrap_held={},
+        attach_ts_provider=lambda lyr, eid: 0.0,
+        evict_fn=lambda lyr, eid: None,
     )
     s._scan_once()
     s._peer_rpc.pull.assert_not_called()
@@ -158,6 +167,7 @@ def test_scan_once_exception_does_not_kill_loop():
     s._scan_once = flaky  # type: ignore[method-assign]
     s._policy = MigrationPolicy(
         scan_interval_s=0.01, heat_threshold=50, max_experts_per_layer=128,
+        evict_cooldown_s=0.0, eviction_enabled=False,
     )
 
     s.start()

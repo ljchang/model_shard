@@ -107,6 +107,8 @@ class MigrationPolicy:
     scan_interval_s: float
     heat_threshold: int
     max_experts_per_layer: int
+    evict_cooldown_s: float = 30.0
+    eviction_enabled: bool = True
 
 
 class MigrationScanner:
@@ -133,6 +135,9 @@ class MigrationScanner:
         peer_rpc: Any,
         attacher: Callable[[int, int, list[mx.array]], None],
         ownership_announcer: Callable[[int, int], None],
+        bootstrap_held: dict[int, set[int]],
+        attach_ts_provider: Callable[[int, int], float],
+        evict_fn: Callable[[int, int], None],
         rng: _random.Random | None = None,
     ) -> None:
         self._self_shard_id = self_shard_id
@@ -144,6 +149,9 @@ class MigrationScanner:
         self._peer_rpc = peer_rpc
         self._attacher = attacher
         self._ownership_announcer = ownership_announcer
+        self._bootstrap_held = bootstrap_held
+        self._attach_ts_provider = attach_ts_provider
+        self._evict_fn = evict_fn
         self._rng = rng or _random.Random()
         self._stopping = _threading.Event()
         self._thread: _threading.Thread | None = None
@@ -176,33 +184,75 @@ class MigrationScanner:
         if not self._in_flight.acquire(blocking=False):
             return
         try:
-            pick = self._select_candidate()
-            if pick is None:
-                return
-            layer_idx, expert_id, source = pick
-            try:
-                tensors = self._peer_rpc.pull(
-                    source_shard_id=source,
-                    layer_idx=layer_idx,
-                    expert_id=expert_id,
-                )
-            except Exception:
-                _LOG.exception(
-                    "migration pull failed: %s layer=%d expert=%d",
-                    source, layer_idx, expert_id,
-                )
-                return
-            try:
-                self._attacher(layer_idx, expert_id, tensors)
-            except Exception:
-                _LOG.exception(
-                    "attach failed after pull: layer=%d expert=%d",
-                    layer_idx, expert_id,
-                )
-                return
-            self._ownership_announcer(layer_idx, expert_id)
+            self._maybe_pull_one()
+            self._maybe_evict_one()
         finally:
             self._in_flight.release()
+
+    def _maybe_pull_one(self) -> None:
+        """Existing pull logic extracted to its own method so eviction can
+        run alongside cleanly (both under the single in-flight lock)."""
+        pick = self._select_candidate()
+        if pick is None:
+            return
+        layer_idx, expert_id, source = pick
+        try:
+            tensors = self._peer_rpc.pull(
+                source_shard_id=source,
+                layer_idx=layer_idx,
+                expert_id=expert_id,
+            )
+        except Exception:
+            _LOG.exception(
+                "migration pull failed: %s layer=%d expert=%d",
+                source, layer_idx, expert_id,
+            )
+            return
+        try:
+            self._attacher(layer_idx, expert_id, tensors)
+        except Exception:
+            _LOG.exception(
+                "attach failed after pull: layer=%d expert=%d",
+                layer_idx, expert_id,
+            )
+            return
+        self._ownership_announcer(layer_idx, expert_id)
+
+    def _maybe_evict_one(self) -> None:
+        """Eviction pass — runs after _maybe_pull_one under the same in-flight
+        lock. Only fires when a layer is at capacity. Picks the coldest
+        non-bootstrap, non-cooldown expert. Last-replica guard is enforced by
+        the evict_fn (Node.migration_detach) raising LastReplicaError; the
+        scanner catches it and moves on to the next layer."""
+        if not self._policy.eviction_enabled:
+            return
+        import time as _time
+        now = _time.time()
+        for layer_idx in list(self._live_experts.keys()):
+            held = set(self._live_experts.get(layer_idx, set()))
+            if len(held) < self._policy.max_experts_per_layer:
+                continue
+            bootstrap = self._bootstrap_held.get(layer_idx, set())
+            eligible = {
+                e for e in held - bootstrap
+                if now - self._attach_ts_provider(layer_idx, e)
+                   >= self._policy.evict_cooldown_s
+            }
+            if not eligible:
+                continue
+            victim = min(
+                eligible, key=lambda e: self._heat_tracker.local_heat(layer_idx, e)
+            )
+            try:
+                self._evict_fn(layer_idx, victim)
+            except Exception:
+                # LastReplicaError, or any other evict-side refusal: try next layer.
+                _LOG.exception(
+                    "eviction skipped: layer=%d expert=%d",
+                    layer_idx, victim,
+                )
+                continue
+            return  # evict at most one per tick
 
     def start(self) -> None:
         """Start the background scan thread. Idempotent."""
