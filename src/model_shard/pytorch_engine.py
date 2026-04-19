@@ -87,14 +87,36 @@ def make_cache(model: Any) -> Any:
 
 
 def make_masks(model: Any, h: torch.Tensor, cache: Any) -> tuple[Any, Any]:
-    """HF computes masks internally on layer.forward; we return placeholders.
+    """Compute per-layer-type rotary position embeddings for the forward pass.
 
-    The returned tuple is passed through the Backend.run_layer_atomic /
-    run_attention_and_route signatures unchanged — concrete backends decide
-    how to use them. On the PyTorch side, None / None is safe because the
-    layer builds its own causal mask from position_ids + sliding_window.
+    Phase 7-C-1: Gemma 4's rotary embedding is per-layer-type (different
+    inv_freq for "full_attention" vs "sliding_attention"). We compute once
+    per unique layer type and return a dict keyed by layer_type string.
+    The Backend protocol's ``masks: tuple[Mask, Mask]`` tuple becomes:
+
+    - slot 0: ``rotary_dict[layer_type] -> (cos, sin)``
+    - slot 1: ``attention_mask_dict`` or ``None`` (HF derives causal when None)
     """
-    return (None, None)
+    cache_len = cache.get_seq_length() if cache is not None else 0
+    seq_len = h.shape[1]
+    device = h.device
+    position_ids = torch.arange(
+        cache_len, cache_len + seq_len, dtype=torch.long, device=device,
+    ).unsqueeze(0)
+    # Config may be nested (AutoModelForCausalLM wraps text config)
+    config = getattr(model, "config", None)
+    layer_types = list(getattr(config, "layer_types", [])) if config is not None else []
+    unique_types = sorted(set(layer_types))
+    if not unique_types:
+        # Fallback: single "full_attention" entry (tests with minimal models).
+        unique_types = ["full_attention"]
+    rotary_dict: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+    rotary_emb = model.model.rotary_emb
+    with torch.no_grad():
+        for layer_type in unique_types:
+            cos, sin = rotary_emb(h, position_ids, layer_type)
+            rotary_dict[layer_type] = (cos, sin)
+    return rotary_dict, None
 
 
 def run_layer_atomic(
@@ -105,16 +127,36 @@ def run_layer_atomic(
     global_mask: Any,
     sliding_mask: Any,
 ) -> torch.Tensor:
-    """Run one decoder layer atomically.
+    """Run one decoder layer against the real HF Gemma4TextDecoderLayer.
 
-    HF ``Gemma4DecoderLayer.forward`` builds its own attention mask; we
-    pass the hidden states through and let the layer consume / update the
-    cache in-place. ``use_cache=True`` is always set (works around
-    transformers bug #45242)."""
+    Phase 7-C-1: ``global_mask`` = rotary_dict (keyed by layer_type);
+    ``sliding_mask`` = attention_mask_dict or None (HF derives causal).
+    ``position_ids`` / ``cache_position`` derived from cache state.
+    """
+    rotary_dict = global_mask
+    attn_mask_dict = sliding_mask
     layer = model.model.layers[layer_idx]
+    layer_type = layer.layer_type
+    cos, sin = rotary_dict[layer_type]
+    attention_mask = (
+        attn_mask_dict.get(layer_type) if attn_mask_dict is not None else None
+    )
+    cache_len = cache.get_seq_length() if cache is not None else 0
+    seq_len = h.shape[1]
+    device = h.device
+    position_ids = torch.arange(
+        cache_len, cache_len + seq_len, dtype=torch.long, device=device,
+    ).unsqueeze(0)
     with torch.no_grad():
-        out = layer(h)
-    # HF layer can return a tuple (hidden, attn_weights, past_kv) or just hidden.
+        out = layer(
+            hidden_states=h,
+            position_embeddings=(cos, sin),
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=cache,
+        )
+    # HF Gemma4TextDecoderLayer returns a plain torch.Tensor (not tuple).
+    # Defensive: if some config variant returns tuple, unpack.
     if isinstance(out, tuple):
         return out[0]  # type: ignore[no-any-return]
     return out  # type: ignore[no-any-return]
