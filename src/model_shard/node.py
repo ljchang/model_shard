@@ -41,6 +41,7 @@ from typing import Any, BinaryIO, cast
 import mlx.core as mx
 
 from model_shard._pb import wire_pb2
+from model_shard.backends import Backend, MLXBackend
 from model_shard.envelope import recv_envelope, send_envelope
 from model_shard.expert_orchestrator import (
     ExpertOrchestrator,
@@ -109,6 +110,7 @@ class Node:
         shard: ShardSpec,
         shard_map: ShardMap,
         loaded_model: LoadedModel | None = None,
+        backend: Backend | None = None,
         total_layers: int = 0,
     ) -> None:
         self._shard = shard
@@ -144,25 +146,25 @@ class Node:
         # Phase 5b: per-node heat tracker for routing-count EMA.
         self._heat_tracker = HeatTracker()
 
-        # Phase 5a: when ENABLE_PARTIAL_LOAD is set AND the caller did not
-        # pass a pre-loaded model AND this shard actually hosts routed
-        # experts, build the model via ``load_model_partial`` so only the
-        # held expert slices are materialized. Otherwise preserve the prior
-        # contract (caller-supplied model).
-        if loaded_model is None and _partial_load_enabled() and shard.moe_experts:
-            from model_shard.mlx_engine import load_model_partial
-            held = {k: list(v) for k, v in shard.moe_experts.items()}
-            self._lm: LoadedModel = load_model_partial(
-                "mlx-community/gemma-4-26b-a4b-it-4bit",
-                held,
+        # Phase 7-A: Backend construction.
+        # Precedence:
+        #   1. Explicit `backend` kwarg wins.
+        #   2. Else, if `loaded_model` was passed, wrap it in MLXBackend.
+        #   3. Else, construct MLXBackend and call .load() / .load_partial().
+        if backend is not None:
+            self._backend: Backend = backend
+        elif loaded_model is not None:
+            self._backend = MLXBackend.from_loaded_model(
+                loaded_model, mlx_lock=_MLX_COMPUTE_LOCK
             )
         else:
-            # Pre-Phase-5a contract: caller is responsible for supplying a
-            # fully-loaded model. Type is narrowed to ``LoadedModel`` — if a
-            # caller passes ``None`` without flipping the partial-load gate,
-            # subsequent attribute access on ``self._lm`` will fail loudly,
-            # which matches prior behavior.
-            self._lm = cast(LoadedModel, loaded_model)
+            b = MLXBackend(mlx_lock=_MLX_COMPUTE_LOCK)
+            if _partial_load_enabled() and shard.moe_experts:
+                held = {L: list(ids) for L, ids in shard.moe_experts.items()}
+                b.load_partial("mlx-community/gemma-4-26b-a4b-it-4bit", held)
+            else:
+                b.load("mlx-community/gemma-4-26b-a4b-it-4bit")
+            self._backend = b
         self._total_layers = total_layers
         # Phase 6-B: provenance chain per forward pass.
         self._provenance_enabled = _provenance_enabled()
@@ -288,6 +290,14 @@ class Node:
     @property
     def is_tail(self) -> bool:
         return self._shard.end_layer == self._total_layers
+
+    @property
+    def _lm(self) -> Any:
+        """Deprecated: use self._backend methods directly. Kept for
+        Phase 1-6 callers that read node._lm as a LoadedModel. Only
+        meaningful for MLXBackend; other backends return whatever they
+        hold internally (may be a torch.nn.Module etc.)."""
+        return getattr(self._backend, "_lm", None)
 
     # ---------------------------------------------------------------- server
 
