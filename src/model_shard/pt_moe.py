@@ -15,6 +15,8 @@ from typing import Any
 import torch
 import torch.nn.functional as F  # noqa: N812
 
+from model_shard.pytorch_engine import _resolve_layer_type
+
 HeatObserver = Callable[[int, int, float], None] | None
 
 
@@ -52,7 +54,7 @@ def run_attention_and_route(
     - top_k_weights: [B*S, K]
     """
     layer = _layer(model, layer_idx)
-    layer_type = layer.layer_type
+    layer_type = _resolve_layer_type(model, layer_idx)
     rotary_dict, attn_mask_dict = masks
     cos, sin = rotary_dict[layer_type]
     attention_mask = (
@@ -68,12 +70,15 @@ def run_attention_and_route(
         # Attention sub-block
         residual = h
         x = layer.input_layernorm(h)
+        # Gemma4TextAttention.forward requires shared_kv_states (no default);
+        # empty dict is correct for non-kv-shared models.
         attn_out = layer.self_attn(
             hidden_states=x,
             position_embeddings=(cos, sin),
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_values=cache,
+            shared_kv_states={},
         )
         # HF attention returns (attn_output, attn_weights_or_None)
         if isinstance(attn_out, tuple):

@@ -86,6 +86,33 @@ def make_cache(model: Any) -> Any:
     return DynamicCache()
 
 
+def _resolve_layer_type(model: Any, layer_idx: int) -> str:
+    """Resolve the layer type string for ``layer_idx``.
+
+    HF's ``Gemma4TextDecoderLayer`` does NOT expose ``layer_type`` as an
+    attribute — only the inner ``self_attn`` does. The authoritative
+    source is ``config.layer_types[layer_idx]``. For ``Gemma4Config`` that
+    wraps ``Gemma4TextConfig`` we call ``get_text_config()`` to unwrap.
+    Falls back to ``"full_attention"`` if the config has no ``layer_types``.
+    """
+    layer = model.model.layers[layer_idx]
+    # Synthetic test stubs set layer.layer_type directly — honor that first.
+    lt = getattr(layer, "layer_type", None)
+    if isinstance(lt, str):
+        return lt
+    # Real HF layers expose layer_type on self_attn (Gemma4TextAttention).
+    lt = getattr(getattr(layer, "self_attn", None), "layer_type", None)
+    if isinstance(lt, str):
+        return lt
+    config = getattr(model, "config", None)
+    if config is not None and hasattr(config, "get_text_config"):
+        config = config.get_text_config()
+    layer_types = list(getattr(config, "layer_types", [])) if config is not None else []
+    if 0 <= layer_idx < len(layer_types):
+        return str(layer_types[layer_idx])
+    return "full_attention"
+
+
 def make_masks(model: Any, h: torch.Tensor, cache: Any) -> tuple[Any, Any]:
     """Compute per-layer-type rotary position embeddings for the forward pass.
 
@@ -105,6 +132,13 @@ def make_masks(model: Any, h: torch.Tensor, cache: Any) -> tuple[Any, Any]:
     ).unsqueeze(0)
     # Config may be nested (AutoModelForCausalLM wraps text config)
     config = getattr(model, "config", None)
+    # Gemma4Config wraps Gemma4TextConfig; real 26B loads via AutoModelForCausalLM
+    # produce a Gemma4Config whose layer_types lives on .text_config. Call
+    # get_text_config() when available to unwrap. Tiny synthetic configs
+    # expose layer_types directly at the top level (no get_text_config method),
+    # so the hasattr guard preserves test behavior.
+    if config is not None and hasattr(config, "get_text_config"):
+        config = config.get_text_config()
     layer_types = list(getattr(config, "layer_types", [])) if config is not None else []
     unique_types = sorted(set(layer_types))
     if not unique_types:
@@ -136,7 +170,7 @@ def run_layer_atomic(
     rotary_dict = global_mask
     attn_mask_dict = sliding_mask
     layer = model.model.layers[layer_idx]
-    layer_type = layer.layer_type
+    layer_type = _resolve_layer_type(model, layer_idx)
     cos, sin = rotary_dict[layer_type]
     attention_mask = (
         attn_mask_dict.get(layer_type) if attn_mask_dict is not None else None
@@ -147,6 +181,11 @@ def run_layer_atomic(
     position_ids = torch.arange(
         cache_len, cache_len + seq_len, dtype=torch.long, device=device,
     ).unsqueeze(0)
+    # Gemma4TextAttention.forward requires shared_kv_states positionally
+    # (no default). For non-kv-shared models (num_kv_shared_layers=0) an
+    # empty dict is correct — layers with store_full_length_kv may still
+    # stash into it but nothing reads back. Mirror HF's model.forward,
+    # which always threads `shared_kv_states = {}` through the layers.
     with torch.no_grad():
         out = layer(
             hidden_states=h,
@@ -154,6 +193,7 @@ def run_layer_atomic(
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_values=cache,
+            shared_kv_states={},
         )
     # HF Gemma4TextDecoderLayer returns a plain torch.Tensor (not tuple).
     # Defensive: if some config variant returns tuple, unpack.
