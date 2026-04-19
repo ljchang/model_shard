@@ -21,6 +21,11 @@ dev = [
     "types-protobuf>=5.0",
     "types-pyyaml>=6.0",
 ]
+pytorch = [
+    "torch>=2.6",
+    "transformers>=5.5.0",
+    "accelerate>=1.0",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -34,6 +39,7 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 markers = [
     "slow: loads the 14GB model; opt-in via `pytest -m slow`",
+    "cuda: requires NVIDIA CUDA (DGX Spark); skipped on Apple / CPU-only hosts",
 ]
 addopts = "-m 'not slow'"
 

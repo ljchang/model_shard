@@ -87,6 +87,9 @@ class LastReplicaError(RuntimeError):
 # we serialize the expert-RPC compute path (which is the only place multiple
 # node threads run MLX at the same time under Phase 3 expert splitting).
 _MLX_COMPUTE_LOCK = threading.Lock()
+# Phase 7-B: backend-neutral alias. _MLX_COMPUTE_LOCK kept for one release
+# for any external consumer; prefer _COMPUTE_LOCK in new code.
+_COMPUTE_LOCK = _MLX_COMPUTE_LOCK
 
 
 @dataclass
