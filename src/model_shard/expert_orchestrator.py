@@ -27,7 +27,7 @@ from typing import Any, BinaryIO, Protocol, cast
 import mlx.core as mx
 
 from model_shard._pb import wire_pb2
-from model_shard.backends import Backend
+from model_shard.backends import Backend, PyTorchBackend
 from model_shard.envelope import recv_envelope, send_envelope
 from model_shard.mlx_engine import _mx_to_wire_dtype, bytes_to_tensor, tensor_to_bytes
 from model_shard.moe import group_expert_ids_by_owner_loaded
@@ -652,9 +652,29 @@ class ExpertOrchestrator:
 
         # Phase C — aggregation + outer ops. Re-acquire the lock for the
         # final graph construction.
+        #
+        # Phase 7-C-1 Task 4: the three HF outer ops applied after the
+        # per-branch post_feedforward_layernorm_{1,2} + sum:
+        #   block_out = post_feedforward_layernorm(h1 + h2)  # THIRD outer norm
+        #   block_out = post_attn_residual + block_out       # outer residual
+        #   block_out *= layer.layer_scalar                  # layer_scalar mul
+        # See docs/superpowers/reference/2026-04-19-hf-gemma4-forward-signatures.md
+        # ("Decoder Layer body"). These apply ONCE per layer call on the full
+        # [B, S, H] aggregated output — NOT inside the per-position loop.
+        #
+        # Backend-aware layer accessor:
+        #   MLX:     lm.text_model.layers[layer_idx]
+        #   PyTorch: lm.model.layers[layer_idx]  (HF Gemma4ForCausalLM)
+        # The outer ops themselves (LayerNorm, add, multiply) dispatch through
+        # the layer module's __call__ and work on either backend's tensor type.
+        is_pt = isinstance(self.backend, PyTorchBackend)
+        layer = (
+            lm.model.layers[layer_idx]
+            if is_pt
+            else lm.text_model.layers[layer_idx]
+        )
         with self._mlx_guard():
             # Aggregate per position — same shape pattern as Task 9's proof.
-            layer = lm.text_model.layers[layer_idx]
             h1_plus_h2 = mx.zeros_like(post_attn)
             for b in range(top_k_ids.shape[0]):
                 for ll in range(top_k_ids.shape[1]):
@@ -677,18 +697,17 @@ class ExpertOrchestrator:
                         else agg
                     )
 
-            # Outer layer ops from DecoderLayer.__call__ lines 83-88, 107:
-            #   h = post_feedforward_layernorm(h1 + h2)
-            #   h = residual_2 + h
-            #   h = h * layer_scalar
-            # The per-layer-input gating branch (lines 92-105) is skipped here
-            # because Gemma 4 26B has hidden_size_per_layer_input=0, so the gate
-            # modules are None. If that assumption changes, add a guard.
-            out: mx.array = layer.post_feedforward_layernorm(h1_plus_h2)
-            out = post_attn + out
+            # Outer layer ops. The per-layer-input gating branch (HF lines
+            # 102-109) is skipped here because Gemma 4 26B has
+            # hidden_size_per_layer_input=0, so the gate modules are None.
+            # If that assumption changes, add a guard.
+            block_out = layer.post_feedforward_layernorm(h1_plus_h2)
+            block_out = post_attn + block_out
             if layer.layer_scalar is not None:
-                out = out * layer.layer_scalar
-            mx.eval(out)
+                block_out = block_out * layer.layer_scalar
+            out: mx.array = block_out
+            if not is_pt:
+                mx.eval(out)
 
         # Phase C provenance: emit OP_AGGREGATE entry after aggregation.
         if provenance_chain is not None:
