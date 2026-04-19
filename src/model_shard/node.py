@@ -1245,6 +1245,7 @@ class Node:
             live_owners_provider=_live_owners_for_expert,
             retry_max_attempts=_expert_retry_max_attempts(),
             retry_backoff_ms=_expert_retry_backoff_ms(),
+            backend=self._backend,
         )
 
     def _build_membership_runner(self) -> MembershipRunner:

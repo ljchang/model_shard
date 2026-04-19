@@ -27,6 +27,7 @@ from typing import Any, BinaryIO, Protocol, cast
 import mlx.core as mx
 
 from model_shard._pb import wire_pb2
+from model_shard.backends import Backend
 from model_shard.envelope import recv_envelope, send_envelope
 from model_shard.mlx_engine import _mx_to_wire_dtype, bytes_to_tensor, tensor_to_bytes
 from model_shard.moe import (
@@ -185,6 +186,9 @@ class ExpertOrchestrator:
     rng: random.Random = field(default_factory=random.Random)
     live_owners_provider: Callable[[int], set[str]] | None = None
     heat_observer: Callable[[int, list[int]], None] | None = None
+    # FIXME(Phase 7-B): make this required once PyTorchBackend lands; the
+    # current None-fallback keeps pre-Phase-7 construction patterns alive.
+    backend: Backend | None = None
     retry_max_attempts: int = 3
     retry_backoff_ms: tuple[int, ...] = (100, 500)
     _executor: ThreadPoolExecutor = field(init=False, repr=False)
@@ -382,9 +386,18 @@ class ExpertOrchestrator:
         outputs: dict[int, mx.array] = {}
         if local_ids_extra:
             with self._mlx_guard():
-                outputs.update(
-                    run_selected_experts(lm, post_attn, layer_idx, local_ids_extra)
-                )
+                if self.backend is not None:
+                    outputs.update(
+                        self.backend.run_selected_experts(
+                            layer_idx, post_attn, local_ids_extra,
+                        )
+                    )
+                else:
+                    outputs.update(
+                        run_selected_experts(
+                            lm, post_attn, layer_idx, local_ids_extra
+                        )
+                    )
             if provenance_chain is not None and ar_hash is not None:
                 from model_shard.provenance import build_entry
                 for eid in local_ids_extra:
@@ -500,11 +513,18 @@ class ExpertOrchestrator:
                     local_retry = by_owner_retry.pop(self.self_shard_id, [])
                     if local_retry:
                         with self._mlx_guard():
-                            outputs.update(
-                                run_selected_experts(
-                                    lm, post_attn, layer_idx, local_retry
+                            if self.backend is not None:
+                                outputs.update(
+                                    self.backend.run_selected_experts(
+                                        layer_idx, post_attn, local_retry,
+                                    )
                                 )
-                            )
+                            else:
+                                outputs.update(
+                                    run_selected_experts(
+                                        lm, post_attn, layer_idx, local_retry
+                                    )
+                                )
                         if provenance_chain is not None and ar_hash is not None:
                             from model_shard.provenance import build_entry
                             for eid in local_retry:
@@ -561,14 +581,21 @@ class ExpertOrchestrator:
         # stream with concurrent graph construction.
         ar_hash: bytes | None = None
         with self._mlx_guard():
-            post_attn, top_k_ids, top_k_weights = run_attention_and_route(
-                lm, h, layer_idx, cache, masks,
-                heat_observer=self.heat_observer,
-            )
+            if self.backend is not None:
+                post_attn, top_k = self.backend.run_attention_and_route(
+                    layer_idx, h, cache, masks,
+                    heat_observer=self.heat_observer,
+                )
+                top_k_ids, top_k_weights = top_k
+            else:
+                post_attn, top_k_ids, top_k_weights = run_attention_and_route(
+                    lm, h, layer_idx, cache, masks,
+                    heat_observer=self.heat_observer,
+                )
             mx.eval(top_k_ids)
             # Union of all top-k ids across the batch and sequence.
             all_ids = sorted(
-                {int(e) for e in top_k_ids.reshape(-1).tolist()}  # type: ignore[arg-type,union-attr]
+                {int(e) for e in top_k_ids.reshape(-1).tolist()}
             )
             peer_loads = self.loads_provider()
             self_load = peer_loads.get(self.self_shard_id, 0)
@@ -583,8 +610,16 @@ class ExpertOrchestrator:
             )
 
             local_ids = by_owner.pop(self.self_shard_id, [])
-            shared_out = run_shared_expert(lm, post_attn, layer_idx)
-            local_outputs = run_selected_experts(lm, post_attn, layer_idx, local_ids)
+            if self.backend is not None:
+                shared_out = self.backend.run_shared_expert(layer_idx, post_attn)
+                local_outputs = self.backend.run_selected_experts(
+                    layer_idx, post_attn, local_ids,
+                )
+            else:
+                shared_out = run_shared_expert(lm, post_attn, layer_idx)
+                local_outputs = run_selected_experts(
+                    lm, post_attn, layer_idx, local_ids
+                )
             # Force the local compute graph to realize before releasing the
             # lock; otherwise the peer handlers could start evaluating on the
             # default stream while our local graph is still being built.
@@ -650,15 +685,20 @@ class ExpertOrchestrator:
             h1_plus_h2 = mx.zeros_like(post_attn)
             for b in range(top_k_ids.shape[0]):
                 for ll in range(top_k_ids.shape[1]):
-                    ids = [int(x) for x in top_k_ids[b, ll].tolist()]  # type: ignore[arg-type,union-attr]
+                    ids = [int(x) for x in top_k_ids[b, ll].tolist()]
                     per_pos = {
                         eid: outputs[eid][b : b + 1, ll : ll + 1, :] for eid in ids
                     }
                     weights = top_k_weights[b : b + 1, ll : ll + 1, :]
                     per_pos_shared = shared_out[b : b + 1, ll : ll + 1, :]
-                    agg = aggregate_experts(
-                        per_pos, ids, weights, per_pos_shared, post_ffn_ln_2
-                    )
+                    if self.backend is not None:
+                        agg = self.backend.aggregate_experts(
+                            layer_idx, per_pos, ids, weights, per_pos_shared,
+                        )
+                    else:
+                        agg = aggregate_experts(
+                            per_pos, ids, weights, per_pos_shared, post_ffn_ln_2,
+                        )
                     # Splice position ll of h1_plus_h2 with the per-position agg.
                     h1_plus_h2 = (
                         mx.concatenate(
