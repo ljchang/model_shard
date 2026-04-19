@@ -173,6 +173,32 @@ seam: Phase 7-B will add a `PyTorchBackend` for CUDA / DGX Spark, and Phase
 platforms. See
 `docs/superpowers/specs/2026-04-19-phase7a-backend-protocol-design.md`.
 
+## Phase 7-B status: PyTorchBackend + DGX Spark — complete
+
+A `PyTorchBackend` now implements the full `Backend` protocol over HF
+`transformers` `Gemma4ForCausalLM` loaded in bfloat16 on DGX Spark
+(GB10 Grace Blackwell, SM_121, 128 GB unified LPDDR5X). The module
+layout mirrors the MLX side: `pytorch_engine.py` holds the forward-pass
+primitives (load, embed, cache, `run_layer_atomic`, finalize, wire
+serialization), `pt_moe.py` holds the split-layer MoE helpers
+(attention + route, shared expert, per-expert compute, aggregate), and
+`pt_partial_load.py` holds the slice/attach/detach operations against
+HF's stacked expert tensors. `backends/pytorch_backend.py` is a thin
+delegation wrapper that owns the HF model instance. All 20 protocol
+methods are parity with `MLXBackend`, including `slice_expert`,
+`attach_expert`, and `detach_expert`, so Phase 5a/5b/6-C features
+(partial load, dynamic migration, eviction) are available on Spark.
+Backend selection is driven by the `MODEL_SHARD_BACKEND=pytorch|mlx`
+env var, falling back to auto-detect (MLX on Apple Silicon, PyTorch
+elsewhere). The Phase 7-A temporary shims are gone:
+`ExpertOrchestrator.backend=None` fallback and `Node._lm` property both
+deleted. Correctness bar: `tests/test_pytorch_tier1.py` asserts top-1
+agreement against a fixture generated once on Spark and committed.
+Cross-backend parity (MLX vs PyTorch) is deferred to Phase 7-C, along
+with 4-bit quantization on PyTorch, heterogeneous clustering, and perf
+tuning. See
+`docs/superpowers/specs/2026-04-19-phase7b-pytorch-backend-design.md`.
+
 ## Phase 6-B status: Provenance Verification — complete
 
 Every forward pass now carries a hash-chained DAG of `ProvenanceEntry` records that

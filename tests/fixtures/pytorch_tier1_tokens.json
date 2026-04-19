@@ -1,0 +1,9 @@
+{
+  "model_id": "google/gemma-4-26B-A4B-it",
+  "device": "cuda",
+  "dtype": "bfloat16",
+  "n_positions": 10,
+  "prompts": [],
+  "_placeholder": true,
+  "_note": "Replace by running scripts/generate_pytorch_tier1_fixture.py on DGX Spark."
+}
