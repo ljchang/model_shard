@@ -11,5 +11,13 @@ from model_shard.backends.base import (
     Mask,
     TopK,
 )
+from model_shard.backends.mlx_backend import MLXBackend
 
-__all__ = ["Activation", "Backend", "Cache", "Mask", "TopK"]
+__all__ = [
+    "Activation",
+    "Backend",
+    "Cache",
+    "MLXBackend",
+    "Mask",
+    "TopK",
+]
