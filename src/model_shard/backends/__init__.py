@@ -1,7 +1,7 @@
 """Backend protocol and implementations for Phase 7+ multi-backend support.
 
-Phase 7-A ships the protocol and the MLXBackend. Phase 7-B/C add
-PyTorchBackend and heterogeneous-cluster support.
+Phase 7-A shipped the protocol and MLXBackend. Phase 7-B adds
+PyTorchBackend. Phase 7-C will add heterogeneous-cluster support.
 """
 
 from model_shard.backends.base import (
@@ -12,6 +12,7 @@ from model_shard.backends.base import (
     TopK,
 )
 from model_shard.backends.mlx_backend import MLXBackend
+from model_shard.backends.pytorch_backend import PyTorchBackend
 
 __all__ = [
     "Activation",
@@ -19,5 +20,6 @@ __all__ = [
     "Cache",
     "MLXBackend",
     "Mask",
+    "PyTorchBackend",
     "TopK",
 ]
