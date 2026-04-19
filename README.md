@@ -151,6 +151,28 @@ two-phase tentative eviction, memory-pressure probing — Phase 7+. Phase 6
 trilogy complete: 6-A retry, 6-B provenance, 6-C eviction all shipped. See
 `docs/superpowers/specs/2026-04-18-phase6c-eviction-design.md`.
 
+## Phase 7-A status: Backend Protocol + MLXBackend — complete
+
+A `Backend` protocol plus an `MLXBackend` wrapper now sit between `Node` /
+`ExpertOrchestrator` and every tensor-level operation, with zero behavioral
+change on default MLX deployments. The stateful backend class owns the
+`LoadedModel` internally; consumers receive opaque `Activation`, `Cache`,
+`Mask`, and `TopK` handles and either pass them straight back into other
+backend calls or serialize via `tensor_to_bytes`. `Node.__init__(backend=None)`
+defaults to `MLXBackend()`; legacy `loaded_model=` callers remain supported via
+`MLXBackend.from_loaded_model`. `ExpertOrchestrator` gains a `backend` field
+and routes every compute call through `self.backend.X()`; a temporary
+`backend=None` fallback preserves Phase 1–6 construction patterns and will be
+removed in Phase 7-B. `mlx_engine.py` gained a public `run_layer_atomic`
+helper plus a `mx_to_wire_dtype` alias so backends do not depend on private
+names. Correctness is preserved: Tier 1 is bit-exact to the Phase 1 reference
+under the default `MLXBackend`, and every Phase 1–6 E2E test (migration,
+retry, provenance, eviction) passes unchanged. The point of Phase 7-A is the
+seam: Phase 7-B will add a `PyTorchBackend` for CUDA / DGX Spark, and Phase
+7-C a heterogeneous cluster with an `allclose` + top-1 correctness bar across
+platforms. See
+`docs/superpowers/specs/2026-04-19-phase7a-backend-protocol-design.md`.
+
 ## Phase 6-B status: Provenance Verification — complete
 
 Every forward pass now carries a hash-chained DAG of `ProvenanceEntry` records that
