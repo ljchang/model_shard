@@ -50,17 +50,6 @@ def test_node_accepts_explicit_backend():
     assert n._backend is b
 
 
-def test_node_lm_property_is_backend_lm_for_backcompat():
-    """Pre-Phase-7 code that reads node._lm still works; it's a deprecated
-    shim that returns the backend's loaded model. Only valid for MLXBackend."""
-    spec_a = _mk_spec("A", 32004)
-    spec_b = _mk_spec("B", 32005)
-    sm = ShardMap({"A": spec_a, "B": spec_b})
-    lm = MagicMock()
-    n = Node(shard=spec_a, shard_map=sm, loaded_model=lm, total_layers=30)
-    assert n._lm is lm  # property returns the underlying LoadedModel
-
-
 def test_node_passes_mlx_lock_into_backend():
     """Node's _MLX_COMPUTE_LOCK is passed into MLXBackend.__init__ so
     slice/attach/detach serialize against concurrent compute."""

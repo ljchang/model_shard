@@ -9,6 +9,7 @@ from typing import Any
 import mlx.core as mx
 import pytest
 
+from model_shard.backends import MLXBackend
 from model_shard.expert_orchestrator import ExpertOrchestrator, PeerRPC
 from model_shard.mlx_engine import embed_tokens, make_cache, make_masks
 
@@ -59,6 +60,7 @@ def test_multi_owner_orchestrator_picks_less_loaded_peer(loaded_model: Any) -> N
         rpc_timeout_s=1.0,
         loads_provider=lambda: {"peer": 1_000_000, "head": 10},
         rng=random.Random(0),
+        backend=MLXBackend.from_loaded_model(lm),
     )
     try:
         h, cache, masks = _advance_to_layer(lm, layer_idx)
@@ -106,6 +108,7 @@ def test_multi_owner_orchestrator_picks_peer_when_self_overloaded(
         rpc_timeout_s=1.0,
         loads_provider=lambda: {"peer": 10, "head": 1_000_000},
         rng=random.Random(0),
+        backend=MLXBackend.from_loaded_model(lm),
     )
     try:
         h, cache, masks = _advance_to_layer(lm, layer_idx)

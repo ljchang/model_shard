@@ -56,7 +56,7 @@ def test_node_partial_load_active_when_enabled_and_moe_experts_set(
         total_layers=30,
     )
     try:
-        lm = node._lm
+        lm = node._backend._lm
         assert lm.held_ids_per_layer == {15: (0, 3, 6, 9)}
         layer15 = lm.text_model.layers[15]
         assert layer15.experts.switch_glu.gate_proj.weight.shape[0] == 4

@@ -6,6 +6,7 @@ import random
 import mlx.core as mx
 import pytest
 
+from model_shard.backends import MLXBackend
 from model_shard.expert_orchestrator import ExpertOrchestrator
 from model_shard.mlx_engine import load_model
 from model_shard.moe import run_selected_experts
@@ -76,6 +77,7 @@ def test_retry_output_matches_no_failure_output(lm):
         live_owners_provider=live_owners,
         retry_max_attempts=3,
         retry_backoff_ms=(0, 0),
+        backend=MLXBackend.from_loaded_model(lm),
     )
     baseline = orch_nofail._phase_b_with_retry(
         post_attn=post_attn,
@@ -98,6 +100,7 @@ def test_retry_output_matches_no_failure_output(lm):
         live_owners_provider=live_owners,
         retry_max_attempts=3,
         retry_backoff_ms=(0, 0),
+        backend=MLXBackend.from_loaded_model(lm),
     )
     with_fail = orch_fail._phase_b_with_retry(
         post_attn=post_attn,

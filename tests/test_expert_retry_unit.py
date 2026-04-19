@@ -8,7 +8,12 @@ from unittest.mock import MagicMock
 import mlx.core as mx
 import pytest
 
+from model_shard.backends import Backend
 from model_shard.expert_orchestrator import ExpertOrchestrator, ExpertRpcFailure
+
+
+def _mock_backend() -> Any:
+    return MagicMock(spec=Backend)
 
 
 def test_expert_rpc_failure_has_typed_fields():
@@ -32,6 +37,7 @@ def test_orchestrator_accepts_retry_fields_defaults():
         owners={"A": {3}},
         peer_rpc=MagicMock(),
         rpc_timeout_s=1.0,
+        backend=_mock_backend(),
     )
     assert orch.retry_max_attempts == 3
     assert orch.retry_backoff_ms == (100, 500)
@@ -45,6 +51,7 @@ def test_orchestrator_accepts_explicit_retry_fields():
         rpc_timeout_s=1.0,
         retry_max_attempts=5,
         retry_backoff_ms=(10, 50, 200),
+        backend=_mock_backend(),
     )
     assert orch.retry_max_attempts == 5
     assert orch.retry_backoff_ms == (10, 50, 200)
@@ -102,6 +109,7 @@ def _run_test_fanout(
         live_owners_provider=lambda eid: live_owners.get(eid, set()),
         retry_max_attempts=max_attempts,
         retry_backoff_ms=backoff_ms,
+        backend=_mock_backend(),
     )
     post_attn = mx.zeros((1, 1, 8), dtype=mx.bfloat16)
     outputs = orch._phase_b_with_retry(
@@ -196,46 +204,38 @@ def test_retry_to_self_cleans_up_in_flight():
 
     import random
 
-    import model_shard.expert_orchestrator as orch_mod
+    # Backend mock returns stacked outputs for any local run_selected_experts.
+    backend = MagicMock(spec=Backend)
 
-    # Fake lm with run_selected_experts — the helper runs local experts
-    # when routed to self after exclusions.
-    class _FakeLm:
-        pass
-
-    # Monkey-patch moe.run_selected_experts so the local-on-retry path succeeds.
-
-    def _fake_rse(lm, h, layer_idx, ids):
+    def _fake_rse(layer_idx, h, ids):
         return {eid: mx.full((1, 1, 8), float(eid), dtype=mx.bfloat16) for eid in ids}
 
-    orig = orch_mod.run_selected_experts
-    orch_mod.run_selected_experts = _fake_rse
-    try:
-        orch = ExpertOrchestrator(
-            self_shard_id="self",
-            owners=owners,
-            peer_rpc=rpc,
-            rpc_timeout_s=1.0,
-            rng=random.Random(0),
-            live_owners_provider=lambda eid: live.get(eid, set()),
-            retry_max_attempts=3,
-            retry_backoff_ms=(0, 0),
+    backend.run_selected_experts.side_effect = _fake_rse
+
+    orch = ExpertOrchestrator(
+        self_shard_id="self",
+        owners=owners,
+        peer_rpc=rpc,
+        rpc_timeout_s=1.0,
+        rng=random.Random(0),
+        live_owners_provider=lambda eid: live.get(eid, set()),
+        retry_max_attempts=3,
+        retry_backoff_ms=(0, 0),
+        backend=backend,
+    )
+    post_attn = mx.zeros((1, 1, 8), dtype=mx.bfloat16)
+    outputs = orch._phase_b_with_retry(
+        post_attn=post_attn,
+        all_ids=[7],
+        layer_idx=15,
+        request_id="r-leak",
+        initial_local_ids=[],
+        lm=None,
+    )
+    assert 7 in outputs
+    # The critical assertion: no leaked _in_flight entry.
+    with orch._in_flight_lock:
+        assert "r-leak" not in orch._in_flight, (
+            f"_in_flight leaked: {orch._in_flight}"
         )
-        post_attn = mx.zeros((1, 1, 8), dtype=mx.bfloat16)
-        outputs = orch._phase_b_with_retry(
-            post_attn=post_attn,
-            all_ids=[7],
-            layer_idx=15,
-            request_id="r-leak",
-            initial_local_ids=[],
-            lm=_FakeLm(),
-        )
-        assert 7 in outputs
-        # The critical assertion: no leaked _in_flight entry.
-        with orch._in_flight_lock:
-            assert "r-leak" not in orch._in_flight, (
-                f"_in_flight leaked: {orch._in_flight}"
-            )
-        orch.close()
-    finally:
-        orch_mod.run_selected_experts = orig
+    orch.close()

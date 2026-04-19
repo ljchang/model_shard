@@ -13,6 +13,7 @@ import time
 import mlx.core as mx
 import pytest
 
+from model_shard.backends import MLXBackend
 from model_shard.expert_orchestrator import (
     ExpertOrchestrator,
     ExpertRpcFailure,
@@ -38,6 +39,7 @@ def test_observer_aborts_in_flight_rpc(loaded_model) -> None:  # type: ignore[no
         owners=owners,
         peer_rpc=_SlowRpc(delay_s=30.0),
         rpc_timeout_s=30.0,
+        backend=MLXBackend.from_loaded_model(lm),
     )
     from model_shard.mlx_engine import embed_tokens, make_cache, make_masks
     tokens = mx.array([[1, 2]])

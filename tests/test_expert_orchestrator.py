@@ -15,6 +15,7 @@ from typing import Any
 import mlx.core as mx
 import pytest
 
+from model_shard.backends import MLXBackend
 from model_shard.expert_orchestrator import ExpertOrchestrator, PeerRPC
 from model_shard.mlx_engine import embed_tokens, make_cache, make_masks
 
@@ -63,6 +64,7 @@ def test_orchestrator_all_local_matches_atomic(loaded_model: Any) -> None:
         owners={"head": set(range(128)), "mid": set(), "tail": set()},
         peer_rpc=_NoRpc(),
         rpc_timeout_s=1.0,
+        backend=MLXBackend.from_loaded_model(lm),
     )
     h_orch, cache_orch, masks_orch = _replay_through(lm, tokens, layer_idx)
     out_orch = orch.run_split_layer(
@@ -128,6 +130,7 @@ def test_orchestrator_multi_owner_routes_to_less_loaded(loaded_model: Any) -> No
         rpc_timeout_s=1.0,
         loads_provider=lambda: {"peer": 1_000_000, "head": 10},
         rng=_random.Random(0),
+        backend=MLXBackend.from_loaded_model(lm),
     )
     try:
         tokens = mx.array([[1, 42, 99]])

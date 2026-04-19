@@ -93,6 +93,9 @@ def test_tcp_peer_rpc_roundtrip() -> None:
 
 
 def test_orchestrator_close_is_idempotent() -> None:
+    from unittest.mock import MagicMock
+
+    from model_shard.backends import Backend
     from model_shard.expert_orchestrator import ExpertOrchestrator, PeerRPC
 
     class _Rpc(PeerRPC):
@@ -104,6 +107,7 @@ def test_orchestrator_close_is_idempotent() -> None:
         owners={"s": set()},
         peer_rpc=_Rpc(),
         rpc_timeout_s=1.0,
+        backend=MagicMock(spec=Backend),
     )
     orch.close()
     orch.close()  # must not raise

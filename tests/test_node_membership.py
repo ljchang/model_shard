@@ -105,7 +105,7 @@ def test_admission_passes_when_all_peers_alive(monkeypatch: pytest.MonkeyPatch) 
     )
     # All peers are alive in the initial view, so admission passes.
     # We bail out before MLX work runs by raising in the mock.
-    n._lm.language_model.make_cache = MagicMock(side_effect=RuntimeError("mlx not real"))
+    n._backend.make_cache = MagicMock(side_effect=RuntimeError("mlx not real"))
     buf = io.BytesIO()
     req = wire_pb2.BeginRequest(
         protocol_version=1,

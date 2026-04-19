@@ -14,6 +14,7 @@ import mlx.core as mx
 import pytest
 
 from model_shard._pb import wire_pb2
+from model_shard.backends import MLXBackend
 from model_shard.expert_orchestrator import ExpertOrchestrator, PeerRPC
 from model_shard.mlx_engine import (
     bytes_to_tensor,
@@ -210,6 +211,7 @@ def test_run_layers_delegates_split_layer_to_orchestrator(loaded_model) -> None:
         owners={"s": set(range(128))},
         peer_rpc=_ErrRpc(),
         rpc_timeout_s=1.0,
+        backend=MLXBackend.from_loaded_model(lm),
     )
 
     tokens = mx.array([[1, 2, 3, 4]])

@@ -92,6 +92,31 @@ _MLX_COMPUTE_LOCK = threading.Lock()
 _COMPUTE_LOCK = _MLX_COMPUTE_LOCK
 
 
+def _default_backend() -> Backend:
+    """Pick a Backend based on the MODEL_SHARD_BACKEND env var or host platform.
+
+    Precedence:
+      1. ``MODEL_SHARD_BACKEND=pytorch`` → PyTorchBackend.
+      2. ``MODEL_SHARD_BACKEND=mlx`` → MLXBackend.
+      3. Auto: MLX on Apple Silicon, PyTorch otherwise.
+    """
+    env = os.environ.get("MODEL_SHARD_BACKEND", "").lower()
+    if env == "pytorch":
+        from model_shard.backends import PyTorchBackend
+        return PyTorchBackend(torch_lock=_COMPUTE_LOCK)
+    if env == "mlx":
+        return MLXBackend(mlx_lock=_COMPUTE_LOCK)
+    # Auto-detect.
+    try:
+        import mlx.core as _mx
+        if _mx.metal.is_available():
+            return MLXBackend(mlx_lock=_COMPUTE_LOCK)
+    except ImportError:
+        pass
+    from model_shard.backends import PyTorchBackend
+    return PyTorchBackend(torch_lock=_COMPUTE_LOCK)
+
+
 @dataclass
 class _HeadRequestState:
     client_stream: BinaryIO
@@ -142,24 +167,30 @@ class Node:
         # Phase 5b: per-node heat tracker for routing-count EMA.
         self._heat_tracker = HeatTracker()
 
-        # Phase 7-A: Backend construction.
+        # Phase 7-A / 7-B: Backend construction.
         # Precedence:
         #   1. Explicit `backend` kwarg wins.
         #   2. Else, if `loaded_model` was passed, wrap it in MLXBackend.
-        #   3. Else, construct MLXBackend and call .load() / .load_partial().
+        #   3. Else, ``_default_backend()`` picks based on
+        #      MODEL_SHARD_BACKEND / Apple-Silicon auto-detect, then
+        #      load() / load_partial() is called on it.
         if backend is not None:
             self._backend: Backend = backend
         elif loaded_model is not None:
             self._backend = MLXBackend.from_loaded_model(
-                loaded_model, mlx_lock=_MLX_COMPUTE_LOCK
+                loaded_model, mlx_lock=_COMPUTE_LOCK
             )
         else:
-            b = MLXBackend(mlx_lock=_MLX_COMPUTE_LOCK)
+            b = _default_backend()
+            if b.name == "mlx":
+                hf_id = "mlx-community/gemma-4-26b-a4b-it-4bit"
+            else:
+                hf_id = "google/gemma-4-26B-A4B-it"
             if _partial_load_enabled() and shard.moe_experts:
                 held = {L: list(ids) for L, ids in shard.moe_experts.items()}
-                b.load_partial("mlx-community/gemma-4-26b-a4b-it-4bit", held)
+                b.load_partial(hf_id, held)
             else:
-                b.load("mlx-community/gemma-4-26b-a4b-it-4bit")
+                b.load(hf_id)
             self._backend = b
         self._total_layers = total_layers
         # Phase 6-B: provenance chain per forward pass.
@@ -286,14 +317,6 @@ class Node:
     @property
     def is_tail(self) -> bool:
         return self._shard.end_layer == self._total_layers
-
-    @property
-    def _lm(self) -> Any:
-        """Deprecated: use self._backend methods directly. Kept for
-        Phase 1-6 callers that read node._lm as a LoadedModel. Only
-        meaningful for MLXBackend; other backends return whatever they
-        hold internally (may be a torch.nn.Module etc.)."""
-        return getattr(self._backend, "_lm", None)
 
     # ---------------------------------------------------------------- server
 
@@ -925,25 +948,42 @@ class Node:
 
     def _run_my_layers(
         self,
-        h: mx.array,
+        h: Any,
         cache: list[Any],
         request_id: str = "",
         provenance_chain: list[ProvenanceEntry] | None = None,
-    ) -> mx.array:
-        global_mask, sliding_mask = make_masks(self._lm, h, cache)
-        return run_layers(
-            self._lm,
-            h,
-            self._shard.start_layer,
-            self._shard.end_layer,
-            cache,
-            global_mask,
-            sliding_mask,
-            split_layers=self._split_layers,
-            orchestrator=self._orchestrator,
-            request_id=request_id,
-            provenance_chain=provenance_chain,
-            node_id=self._shard.shard_id,
+    ) -> Any:
+        if isinstance(self._backend, MLXBackend):
+            lm = self._backend._lm
+            assert lm is not None, "MLXBackend not loaded"
+            global_mask, sliding_mask = make_masks(lm, h, cache)
+            return run_layers(
+                lm,
+                h,
+                self._shard.start_layer,
+                self._shard.end_layer,
+                cache,
+                global_mask,
+                sliding_mask,
+                split_layers=self._split_layers,
+                orchestrator=self._orchestrator,
+                request_id=request_id,
+                provenance_chain=provenance_chain,
+                node_id=self._shard.shard_id,
+            )
+        # PyTorch path.
+        from model_shard import pytorch_engine
+        from model_shard.backends import PyTorchBackend
+        assert isinstance(self._backend, PyTorchBackend)
+        masks = self._backend.make_masks(h, cache)
+        return pytorch_engine.run_layers(
+            self._backend._model,
+            start_layer=self._shard.start_layer,
+            end_layer=self._shard.end_layer,
+            h=h,
+            cache=cache,
+            masks=masks,
+            is_split_layer=lambda i: i in self._split_layers,
         )
 
     def _forward_activation(

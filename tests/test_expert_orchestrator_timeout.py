@@ -5,6 +5,7 @@ from __future__ import annotations
 import mlx.core as mx
 import pytest
 
+from model_shard.backends import MLXBackend
 from model_shard.expert_orchestrator import (
     ExpertOrchestrator,
     ExpertRpcFailure,
@@ -26,6 +27,7 @@ def test_orchestrator_rpc_failure_raises_expert_rpc_failure(loaded_model) -> Non
         owners=owners,
         peer_rpc=_FailingRpc(),
         rpc_timeout_s=0.1,
+        backend=MLXBackend.from_loaded_model(lm),
     )
     from model_shard.mlx_engine import embed_tokens, make_cache, make_masks
     tokens = mx.array([[1, 2, 3]])

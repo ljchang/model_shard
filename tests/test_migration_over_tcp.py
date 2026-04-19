@@ -62,11 +62,11 @@ def test_pull_over_tcp_matches_bit_exact(migration_env):
         assert 3 in node_b._live_experts[15]
 
         # Verify bit-exact post-attach.
-        hidden = node_a._lm.text_model.layers[15].pre_feedforward_layernorm_2.weight.shape[0]
+        hidden = node_a._backend._lm.text_model.layers[15].pre_feedforward_layernorm_2.weight.shape[0]
         mx.random.seed(7)
         h = mx.random.normal((1, 7, hidden)).astype(mx.bfloat16)
-        out_a = run_selected_experts(node_a._lm, h, 15, [3])
-        out_b = run_selected_experts(node_b._lm, h, 15, [3])
+        out_a = run_selected_experts(node_a._backend._lm, h, 15, [3])
+        out_b = run_selected_experts(node_b._backend._lm, h, 15, [3])
         assert mx.array_equal(out_a[3], out_b[3]).item()
     finally:
         node_a.shutdown()

@@ -4,6 +4,7 @@ from __future__ import annotations
 import random
 from unittest.mock import MagicMock
 
+from model_shard.backends import Backend
 from model_shard.expert_orchestrator import ExpertOrchestrator
 from model_shard.moe import group_expert_ids_by_owner_loaded
 
@@ -80,6 +81,7 @@ def test_orchestrator_accepts_and_invokes_live_owners_provider():
         peer_rpc=MagicMock(),
         rpc_timeout_s=1.0,
         live_owners_provider=provider,
+        backend=MagicMock(spec=Backend),
     )
     assert orch.live_owners_provider is provider
     # Directly drive the grouping step with the orchestrator's provider.
