@@ -92,6 +92,27 @@ def make_masks(lm: LoadedModel, h: mx.array, cache: list[Any]) -> tuple[Any, Any
     return global_mask, sliding_mask
 
 
+def run_layer_atomic(
+    lm: LoadedModel,
+    layer_idx: int,
+    h: mx.array,
+    cache: list[Any],
+    global_mask: Any,
+    sliding_mask: Any,
+) -> mx.array:
+    """Run one non-split decoder layer atomically.
+
+    Extracts the inner body of ``run_layers`` for a single layer so a
+    Backend can expose this as its own method. ``layer.layer_type`` picks
+    the mask; ``cache[tm.layer_idx_to_cache_idx[layer_idx]]`` picks the
+    per-layer cache slot."""
+    tm = lm.text_model
+    layer = tm.layers[layer_idx]
+    c = cache[tm.layer_idx_to_cache_idx[layer_idx]]
+    mask = global_mask if layer.layer_type == "full_attention" else sliding_mask
+    return layer(h, mask, c, per_layer_input=None)  # type: ignore[no-any-return]
+
+
 def run_layers(
     lm: LoadedModel,
     h: mx.array,
@@ -120,7 +141,6 @@ def run_layers(
     appended for each atomic (non-split) layer after execution. Existing
     callers that omit these kwargs are unaffected.
     """
-    tm = lm.text_model
     split = split_layers or set()
     for i in range(start_layer, end_layer):
         if i in split:
@@ -138,10 +158,7 @@ def run_layers(
                 provenance_chain=provenance_chain,
             )
         else:
-            layer = tm.layers[i]
-            c = cache[tm.layer_idx_to_cache_idx[i]]
-            mask = global_mask if layer.layer_type == "full_attention" else sliding_mask
-            h = layer(h, mask, c, per_layer_input=None)
+            h = run_layer_atomic(lm, i, h, cache, global_mask, sliding_mask)
             if provenance_chain is not None:
                 from model_shard.provenance import build_entry
                 from model_shard.request import OpDescriptor, OpType
@@ -184,6 +201,10 @@ def _mx_to_wire_dtype(dtype: mx.Dtype) -> int:
         if mxt == dtype:
             return wire
     raise ValueError(f"unsupported mx dtype for wire: {dtype}")
+
+
+# Phase 7-A: public alias so backends don't depend on a private name.
+mx_to_wire_dtype = _mx_to_wire_dtype
 
 
 def tensor_to_bytes(arr: mx.array) -> bytes:
