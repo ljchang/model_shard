@@ -177,7 +177,7 @@ def test_decode_loop_emits_error_to_client_on_broken_pipe(monkeypatch: pytest.Mo
     )
     monkeypatch.setattr(n, "_run_my_layers", MagicMock(return_value=MagicMock()))
     monkeypatch.setattr(
-        "model_shard.node.embed_tokens", lambda *_a, **_k: MagicMock()
+        n._backend, "embed", lambda *_a, **_k: MagicMock()
     )
 
     with n._state_lock:

@@ -59,16 +59,9 @@ from model_shard.migration import (
 )
 from model_shard.mlx_engine import (
     LoadedModel,
-    _mx_to_wire_dtype,
-    bytes_to_tensor,
-    embed_tokens,
-    finalize,
-    make_cache,
     make_masks,
     run_layers,
-    tensor_to_bytes,
 )
-from model_shard.partial_load import attach_expert, detach_expert, slice_expert
 from model_shard.request import ProvenanceEntry
 from model_shard.shard_map import ShardMap, ShardSpec
 
@@ -405,7 +398,7 @@ class Node:
             )
             return
 
-        cache = make_cache(self._lm)
+        cache = self._backend.make_cache()
         state = _HeadRequestState(
             client_stream=client_stream,
             max_new_tokens=int(req.max_new_tokens) or 1,
@@ -416,8 +409,7 @@ class Node:
 
         # Prefill on this shard's layer range.
         prompt_tokens = list(req.prompt_token_ids)
-        token_ids = mx.array([prompt_tokens])
-        h = embed_tokens(self._lm, token_ids)
+        h = self._backend.embed(prompt_tokens)
 
         provenance_chain: list[ProvenanceEntry] = []
         if self._provenance_enabled:
@@ -482,7 +474,7 @@ class Node:
                 # Next decode round: embed this token and forward an activation.
                 with self._state_lock:
                     cache = self._kv_caches[request_id]
-                h = embed_tokens(self._lm, mx.array([[token_id]]))
+                h = self._backend.embed([token_id])
 
                 decode_chain: list[ProvenanceEntry] | None = None
                 if self._provenance_enabled:
@@ -607,10 +599,12 @@ class Node:
                 return
 
         with self._state_lock:
-            cache = self._kv_caches.setdefault(act.request_id, make_cache(self._lm))
+            cache = self._kv_caches.setdefault(
+                act.request_id, self._backend.make_cache()
+            )
 
-        h = bytes_to_tensor(
-            tensor_bytes, shape=list(act.tensor.shape), dtype=act.tensor.dtype
+        h = self._backend.bytes_to_tensor(
+            tensor_bytes, shape=list(act.tensor.shape), dtype=int(act.tensor.dtype),
         )
 
         # Build a local provenance chain seeded from the inbound chain so that
@@ -651,7 +645,7 @@ class Node:
             return
 
         if self.is_tail:
-            logits = finalize(self._lm, h)
+            logits = self._backend.finalize(h)
             if self._provenance_enabled:
                 from model_shard.provenance import build_entry
                 from model_shard.request import OpDescriptor, OpType
@@ -663,7 +657,7 @@ class Node:
                     parent_hashes=parent_hashes,
                 )
                 self._pending_finalize[act.request_id] = finalize_entry
-            token_id = int(mx.argmax(logits[0, -1, :]).item())
+            token_id = self._backend.argmax_last(logits)
             # Position is managed by the head; we leave it 0 here.
             self._send_sampled_token(act.request_id, token_id, position=0)
         else:
@@ -732,8 +726,6 @@ class Node:
         the subset we host, because the caller would stack in-order outputs
         and get wrong aggregation.
         """
-        from model_shard.moe import run_selected_experts
-
         layer_idx = int(req.layer_idx)
         requested = [int(e) for e in req.expert_ids]
 
@@ -782,10 +774,8 @@ class Node:
             )
             return
 
-        h = bytes_to_tensor(
-            tensor_bytes,
-            shape=list(req.h_spec.shape),
-            dtype=req.h_spec.dtype,
+        h = self._backend.bytes_to_tensor(
+            tensor_bytes, shape=list(req.h_spec.shape), dtype=int(req.h_spec.dtype),
         )
 
         # I2: any failure inside the expert compute (OOM, unknown layer in
@@ -835,8 +825,8 @@ class Node:
 
             try:
                 with _MLX_COMPUTE_LOCK:
-                    outputs = run_selected_experts(
-                        self._lm, h, layer_idx, requested
+                    outputs = self._backend.run_selected_experts(
+                        layer_idx, h, requested
                     )
                     # Stack in request order so the caller can unstack by index.
                     stacked = mx.stack(
@@ -846,7 +836,7 @@ class Node:
                     # serialized bytes are based on fully-computed data (and no
                     # dangling graph refs cross threads).
                     mx.eval(stacked)
-                    raw = tensor_to_bytes(stacked)
+                    raw = self._backend.tensor_to_bytes(stacked)
             except Exception as exc:
                 _LOG.exception("expert fan-out raised")
                 _send_error(
@@ -863,7 +853,7 @@ class Node:
             resp.expert_response.layer_idx = layer_idx
             resp.expert_response.expert_ids.extend(requested)
             resp.expert_response.outputs_spec.shape.extend(list(stacked.shape))
-            resp.expert_response.outputs_spec.dtype = _mx_to_wire_dtype(stacked.dtype)
+            resp.expert_response.outputs_spec.dtype = self._backend.dtype_to_wire(stacked)
             resp.expert_response.outputs_spec.quant = wire_pb2.QUANT_NONE
             resp.expert_response.outputs_spec.byte_count = len(raw)
 
@@ -902,9 +892,7 @@ class Node:
         layer_idx = int(req.layer_idx)
         expert_id = int(req.expert_id)
         try:
-            tensors = slice_expert(
-                self._lm, layer_idx, expert_id, _MLX_COMPUTE_LOCK
-            )
+            tensors = self._backend.slice_expert(layer_idx, expert_id)
         except KeyError as e:
             _send_error(
                 inbound_stream,
@@ -923,9 +911,9 @@ class Node:
         for t in tensors:
             d = resp.expert_weight_transfer.tensors.add()
             d.shape.extend(list(t.shape))
-            d.dtype = _mx_to_wire_dtype(t.dtype)
+            d.dtype = self._backend.dtype_to_wire(t)
             d.quant = wire_pb2.QUANT_NONE
-            raw = tensor_to_bytes(t)
+            raw = self._backend.tensor_to_bytes(t)
             d.byte_count = len(raw)
             blobs.append(raw)
         send_envelope(inbound_stream, resp, b"".join(blobs))
@@ -966,7 +954,9 @@ class Node:
         self._debug_captures.setdefault(request_id, []).append(
             (self._shard.end_layer, h)
         )
-        env, raw = _activation_envelope(request_id, self._shard.end_layer, h)
+        env, raw = _activation_envelope(
+            request_id, self._shard.end_layer, h, self._backend,
+        )
         if self._provenance_enabled and provenance_chain:
             from model_shard.provenance import entry_to_pb
             env.activation.provenance.extend(
@@ -1124,9 +1114,7 @@ class Node:
     ) -> None:
         """Receive-side integration: call attach_expert, update _live_experts,
         add to _ownership_seen, announce ADD delta on gossip (if running)."""
-        attach_expert(
-            self._lm, layer_idx, expert_id, tensors, _MLX_COMPUTE_LOCK
-        )
+        self._backend.attach_expert(layer_idx, expert_id, tensors)
         with self._live_experts_lock:
             self._live_experts.setdefault(layer_idx, set()).add(expert_id)
             self._live_experts_attach_ts[(layer_idx, expert_id)] = time.time()
@@ -1174,7 +1162,7 @@ class Node:
                 f"no other live owners"
             )
         # Safe to proceed.
-        detach_expert(self._lm, layer_idx, expert_id, _MLX_COMPUTE_LOCK)
+        self._backend.detach_expert(layer_idx, expert_id)
         with self._live_experts_lock:
             self._live_experts.get(layer_idx, set()).discard(expert_id)
             self._live_experts_attach_ts.pop((layer_idx, expert_id), None)
@@ -1373,15 +1361,15 @@ def _resolve_downstream(
 
 
 def _activation_envelope(
-    request_id: str, next_layer: int, h: mx.array
+    request_id: str, next_layer: int, h: Any, backend: Backend,
 ) -> tuple[wire_pb2.Envelope, bytes]:
-    raw = tensor_to_bytes(h)
+    raw = backend.tensor_to_bytes(h)
     env = wire_pb2.Envelope()
     env.activation.protocol_version = _PROTOCOL_VERSION
     env.activation.request_id = request_id
     env.activation.next_layer_idx = next_layer
     env.activation.tensor.shape.extend(list(h.shape))
-    env.activation.tensor.dtype = _mx_to_wire_dtype(h.dtype)
+    env.activation.tensor.dtype = backend.dtype_to_wire(h)
     env.activation.tensor.quant = wire_pb2.QUANT_NONE
     env.activation.tensor.byte_count = len(raw)
     return env, raw
