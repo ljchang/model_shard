@@ -199,43 +199,49 @@ with 4-bit quantization on PyTorch, heterogeneous clustering, and perf
 tuning. See
 `docs/superpowers/specs/2026-04-19-phase7b-pytorch-backend-design.md`.
 
-## Phase 7-C-1 status: Real HF Gemma 4 forward integration — landing
+## Phase 7-C-1 status: Real HF Gemma 4 forward integration — complete
 
 Phase 7-C-1 closes the Phase 7-B synthetic-test gap by wiring
 `PyTorchBackend` against HF `transformers`' real `Gemma4TextDecoderLayer.forward`
 with the correct signatures, rather than the stub-shaped call sites that
-Phase 7-B's unit tests exercised. Concrete findings from reading HF
-source: the cache kwarg is `past_key_values` (plural) and the decoder
-returns a plain tensor rather than a tuple; the router returns a 3-tuple
-`(probs, weights, index)` from which only `weights` and `index` are
-consumed; the dense MLP always runs alongside the MoE branch, and the two
-combine via per-branch `post_feedforward_layernorm_{1,2}` summed, then
-an outer `post_feedforward_layernorm` + residual + per-layer
-`layer_scalar` multiply; `layer_type` lives on `self_attn`, not the
-decoder layer; real configs wrap `Gemma4TextConfig` so nested access goes
-through `config.get_text_config()`; `shared_kv_states={}` is required on
+Phase 7-B's unit tests exercised. Tasks 1-5 (landed Mac-side) handled
+the architectural refactor from a reading of HF source: the cache kwarg
+is `past_key_values` (plural) and the decoder returns a plain tensor
+rather than a tuple; the router returns a 3-tuple `(probs, weights,
+index)` from which only `weights` and `index` are consumed; the dense
+MLP always runs alongside the MoE branch, and the two combine via
+per-branch `post_feedforward_layernorm_{1,2}` summed, then an outer
+`post_feedforward_layernorm` + residual + per-layer `layer_scalar`
+multiply; `layer_type` lives on `self_attn`, not the decoder layer;
+real configs wrap `Gemma4TextConfig` so nested access goes through
+`config.get_text_config()`; `shared_kv_states={}` is required on
 attention even when `num_kv_shared_layers=0`; and rotary embeddings are
-per-layer-type, not per-layer-index. Implementation: `make_masks` now
+per-layer-type, not per-layer-index. Implementation: `make_masks`
 returns `(rotary_dict, attn_mask_dict)` keyed by layer_type through the
 existing `masks` tuple slot; `run_layer_atomic` and
 `pt_moe.run_attention_and_route` call the HF layer / attention with full
 kwargs; the orchestrator applies outer layernorm + residual +
-`layer_scalar` after the per-position aggregate loop via a
-backend-aware layer accessor so the MLX path is unaffected. Testing:
-16 synthetic units in `test_pytorch_engine.py`, 8 in
-`test_pt_moe_unit.py`, plus 3 slow CPU integration tests in
+`layer_scalar` after the per-position aggregate loop via a backend-aware
+layer accessor so the MLX path is unaffected. Task 6b (landed on DGX
+Spark) caught four more real-HF divergences that synthetic tests had
+masked: `model.model` is a `Gemma4Model` multimodal wrapper with the
+text model nested as `.language_model` (added a `_text_model()` helper
+used across `pytorch_engine`, `pt_moe`, `pt_partial_load`, and the
+orchestrator); `num_layers` must read via `len(_text_model(...).layers)`
+rather than `config.num_hidden_layers` (the multimodal config doesn't
+expose it); `final_logit_softcapping = 30.0` on the real 26B model and
+must be applied after `lm_head`; and the fixture generator was rewritten
+to greedy-decode through `PyTorchBackend` itself rather than HF's
+`model.generate()`, so Tier-1 is an *internal* regression (our forward
+path doesn't drift) rather than a cross-framework equivalence check.
+Testing: 16 synthetic units in `test_pytorch_engine.py`, 8 in
+`test_pt_moe_unit.py`, 3 slow CPU integration tests in
 `test_pytorch_tiny_hf_integration.py` that instantiate a tiny real
-`Gemma4ForCausalLM` from config and verify end-to-end plumbing; all 6
-MLX slow buckets remain green post-change. Pending (Task 6b): DGX Spark
-fixture regeneration via `scripts/generate_pytorch_tier1_fixture.py` to
-replace the placeholder `tests/fixtures/pytorch_tier1_tokens.json` and
-activate `test_pytorch_tier1.py` as a permanent regression bar. Blocks
-on Spark reachability — Tailscale is set up, DGX Spark enrollment is
-pending. Non-goals deferred to 7-C-2/3/4: cross-backend allclose +
-top-1 agreement harness, heterogeneous cluster + 9-tensor↔2-tensor slice
-bridge + Phase 6-B provenance on the PyTorch path, and the remaining
-tech-debt cleanup (`lm` param threading, `_MLX_COMPUTE_LOCK` alias,
-per-position aggregate-experts signature). See
+`Gemma4ForCausalLM` from config and verify end-to-end plumbing, and
+`tests/test_pytorch_tier1.py` now a permanent Spark-side regression
+against the committed fixture. MLX slow regression bucket (all 6 files)
+stays green. Cross-framework parity (MLX ↔ PyTorch ↔ HF) is explicitly
+deferred to Phase 7-C-2. See
 `docs/superpowers/specs/2026-04-19-phase7c1-real-hf-integration-design.md`.
 
 ## Phase 6-B status: Provenance Verification — complete
