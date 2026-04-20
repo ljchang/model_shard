@@ -5,8 +5,10 @@ description = "Gossip-based distributed MoE inference — Phase 1 static pipelin
 requires-python = ">=3.11"
 readme = "README.md"
 dependencies = [
-    "mlx>=0.19",
-    "mlx-vlm>=0.4.3",
+    # MLX is Apple Silicon only; gate with platform marker so Linux installs
+    # (e.g. DGX Spark) don't try to compile it from source.
+    "mlx>=0.19 ; sys_platform == 'darwin'",
+    "mlx-vlm>=0.4.3 ; sys_platform == 'darwin'",
     "protobuf>=5.0",
     "pyyaml>=6.0",
 ]
