@@ -41,6 +41,25 @@ def _wire_to_torch_dtype(wire: int) -> torch.dtype:
         raise ValueError(f"unsupported wire dtype: {wire}") from None
 
 
+def _text_model(model: Any) -> Any:
+    """Return the ``Gemma4TextModel`` sub-component of a loaded HF model.
+
+    Handles both topology variants:
+
+    - **Text-only** (tiny synthetic test with ``Gemma4TextConfig``):
+      ``model.model`` IS the ``Gemma4TextModel`` directly.
+    - **Multimodal wrapper** (real ``google/gemma-4-26B-A4B-it`` loaded via
+      ``AutoModelForCausalLM.from_pretrained`` with a ``Gemma4Config``):
+      ``model.model`` is a ``Gemma4Model`` that nests the text model at
+      ``.language_model``.
+
+    Using ``getattr(inner, "language_model", inner)`` returns the wrapper's
+    inner text model when present, otherwise the already-text-model node.
+    """
+    inner = model.model
+    return getattr(inner, "language_model", inner)
+
+
 def _default_device() -> str:
     if torch.cuda.is_available():
         return "cuda"
@@ -76,7 +95,7 @@ def embed_tokens(model: Any, token_ids: list[int]) -> torch.Tensor:
     device = next(model.parameters()).device
     input_ids = torch.tensor([token_ids], dtype=torch.long, device=device)
     with torch.no_grad():
-        out: torch.Tensor = model.model.embed_tokens(input_ids)
+        out: torch.Tensor = _text_model(model).embed_tokens(input_ids)
         return out
 
 
@@ -95,7 +114,7 @@ def _resolve_layer_type(model: Any, layer_idx: int) -> str:
     wraps ``Gemma4TextConfig`` we call ``get_text_config()`` to unwrap.
     Falls back to ``"full_attention"`` if the config has no ``layer_types``.
     """
-    layer = model.model.layers[layer_idx]
+    layer = _text_model(model).layers[layer_idx]
     # Synthetic test stubs set layer.layer_type directly — honor that first.
     lt = getattr(layer, "layer_type", None)
     if isinstance(lt, str):
@@ -145,7 +164,7 @@ def make_masks(model: Any, h: torch.Tensor, cache: Any) -> tuple[Any, Any]:
         # Fallback: single "full_attention" entry (tests with minimal models).
         unique_types = ["full_attention"]
     rotary_dict: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
-    rotary_emb = model.model.rotary_emb
+    rotary_emb = _text_model(model).rotary_emb
     with torch.no_grad():
         for layer_type in unique_types:
             cos, sin = rotary_emb(h, position_ids, layer_type)
@@ -169,7 +188,7 @@ def run_layer_atomic(
     """
     rotary_dict = global_mask
     attn_mask_dict = sliding_mask
-    layer = model.model.layers[layer_idx]
+    layer = _text_model(model).layers[layer_idx]
     layer_type = _resolve_layer_type(model, layer_idx)
     cos, sin = rotary_dict[layer_type]
     attention_mask = (
@@ -229,10 +248,25 @@ def run_layers(
 
 
 def finalize(model: Any, h: torch.Tensor) -> torch.Tensor:
-    """Apply the final RMSNorm + lm_head; return logits [1, L, V]."""
+    """Apply the final RMSNorm + lm_head + optional logit softcapping.
+
+    Gemma 4 26B sets ``config.final_logit_softcapping = 30.0`` — HF's
+    ``Gemma4ForCausalLM.forward`` divides logits by the softcap, passes
+    through ``torch.tanh``, then re-multiplies. Skipping this produces
+    logits with different magnitudes; argmax matches at obvious positions
+    but diverges when runner-up logits are close.
+    """
     with torch.no_grad():
-        h = model.model.norm(h)
+        h = _text_model(model).norm(h)
         logits: torch.Tensor = model.lm_head(h)
+        config = getattr(model, "config", None)
+        if config is not None and hasattr(config, "get_text_config"):
+            config = config.get_text_config()
+        softcap = getattr(config, "final_logit_softcapping", None)
+        if softcap is not None:
+            logits = logits / softcap
+            logits = torch.tanh(logits)
+            logits = logits * softcap
         return logits
 
 

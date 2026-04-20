@@ -664,15 +664,17 @@ class ExpertOrchestrator:
         #
         # Backend-aware layer accessor:
         #   MLX:     lm.text_model.layers[layer_idx]
-        #   PyTorch: lm.model.layers[layer_idx]  (HF Gemma4ForCausalLM)
+        #   PyTorch: pytorch_engine._text_model(lm).layers[layer_idx]
+        #            (HF wraps Gemma4TextModel in Gemma4Model.language_model
+        #             for multimodal configs; _text_model unwraps either shape)
         # The outer ops themselves (LayerNorm, add, multiply) dispatch through
         # the layer module's __call__ and work on either backend's tensor type.
         is_pt = isinstance(self.backend, PyTorchBackend)
-        layer = (
-            lm.model.layers[layer_idx]
-            if is_pt
-            else lm.text_model.layers[layer_idx]
-        )
+        if is_pt:
+            from model_shard.pytorch_engine import _text_model
+            layer = _text_model(lm).layers[layer_idx]
+        else:
+            layer = lm.text_model.layers[layer_idx]
         with self._mlx_guard():
             # Aggregate per position — same shape pattern as Task 9's proof.
             h1_plus_h2 = mx.zeros_like(post_attn)

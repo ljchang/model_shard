@@ -15,13 +15,13 @@ from typing import Any
 import torch
 import torch.nn.functional as F  # noqa: N812
 
-from model_shard.pytorch_engine import _resolve_layer_type
+from model_shard.pytorch_engine import _resolve_layer_type, _text_model
 
 HeatObserver = Callable[[int, int, float], None] | None
 
 
 def _layer(model: Any, layer_idx: int) -> Any:
-    return model.model.layers[layer_idx]
+    return _text_model(model).layers[layer_idx]
 
 
 def _run_one_expert(

@@ -66,7 +66,11 @@ class PyTorchBackend:
 
     def num_layers(self) -> int:
         assert self._model is not None
-        return int(self._model.config.num_hidden_layers)
+        # Count via the text model directly. `self._model.config` is the
+        # top-level Gemma4Config (multimodal) which lacks num_hidden_layers;
+        # the field lives on config.get_text_config(). Going via the module
+        # layer list is equivalent and avoids the config unwrap.
+        return len(pytorch_engine._text_model(self._model).layers)
 
     def held_ids(self, layer_idx: int) -> tuple[int, ...]:
         return self._held_experts_per_layer.get(layer_idx, ())

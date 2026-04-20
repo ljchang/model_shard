@@ -3,7 +3,72 @@
   "device": "cuda",
   "dtype": "bfloat16",
   "n_positions": 10,
-  "prompts": [],
-  "_placeholder": true,
-  "_note": "Replace by running scripts/generate_pytorch_tier1_fixture.py on DGX Spark."
+  "generator": "PyTorchBackend greedy decode (prefill + per-layer atomic)",
+  "prompts": [
+    {
+      "prompt": "The quick brown fox",
+      "prompt_ids": [
+        818,
+        3823,
+        8864,
+        37423
+      ],
+      "generated_ids": [
+        37423,
+        37423,
+        37423,
+        37423,
+        37423,
+        37423,
+        7184,
+        7184,
+        7184,
+        7184
+      ]
+    },
+    {
+      "prompt": "In a galaxy far far away",
+      "prompt_ids": [
+        902,
+        496,
+        32423,
+        2793,
+        2793,
+        3121
+      ],
+      "generated_ids": [
+        496,
+        32423,
+        2793,
+        2793,
+        3121,
+        496,
+        32423,
+        2793,
+        2793,
+        3121
+      ]
+    },
+    {
+      "prompt": "Once upon a time",
+      "prompt_ids": [
+        14946,
+        3324,
+        496,
+        990
+      ],
+      "generated_ids": [
+        3324,
+        496,
+        990,
+        3324,
+        496,
+        990,
+        3324,
+        496,
+        990,
+        3324
+      ]
+    }
+  ]
 }

@@ -11,9 +11,11 @@ from typing import Any
 
 import torch
 
+from model_shard.pytorch_engine import _text_model
+
 
 def _experts(model: Any, layer_idx: int) -> Any:
-    return model.model.layers[layer_idx].experts
+    return _text_model(model).layers[layer_idx].experts
 
 
 def slice_expert(
