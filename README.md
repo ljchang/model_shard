@@ -244,6 +244,35 @@ stays green. Cross-framework parity (MLX ↔ PyTorch ↔ HF) is explicitly
 deferred to Phase 7-C-2. See
 `docs/superpowers/specs/2026-04-19-phase7c1-real-hf-integration-design.md`.
 
+## Phase 7-C-2 status: Cross-Backend Correctness Harness — complete
+
+Phase 7-C-2 establishes an empirical agreement bar between `MLXBackend`
+(Mac, 4-bit Gemma 4) and `PyTorchBackend` (DGX Spark, bf16 Gemma 4) by
+comparing tier-1 fixtures recorded as top-K (K=5) softmax-weighted token
+sets per decode position. A unified fixture generator dispatches on
+`MODEL_SHARD_BACKEND=mlx|pytorch` and emits `mlx_tier1_tokens.json` /
+`pytorch_tier1_tokens.json` in identical shape. `top_k_ids_and_weights`
+helpers added to both `mlx_engine.py` and `pytorch_engine.py` (matching
+signatures; softmax cast to float32 on both sides for numerical
+stability). A device-independent pytest
+(`tests/test_cross_backend_correctness.py`) loads both JSONs and asserts
+two agreement floors: at least one of three prompts matches on
+position-0 top-1, and the average top-5 intersection size across all
+(prompt, position) pairs is at least 0.5. Observed at landing: 1/3
+position-0 matches and 1.03 average top-5 overlap across 30 positions —
+well above the random-chance baseline (~0 on vocab=262K) but far from
+identical, consistent with the known 4-bit vs bf16 precision gap. The
+agreement floors are calibrated as regression guards, not tightness
+bars; tokenizer equivalence is asserted separately
+(`mlx-community/gemma-4-26b-a4b-it-4bit` and `google/gemma-4-26B-A4B-it`
+share the same tokenizer). A side-by-side markdown report
+(`tests/fixtures/cross_backend_comparison.md`) is regenerated every run
+for eyeball diagnostics. Non-goals (deferred): activation-level
+`allclose`, KL/JS divergence metrics, online cross-machine harness,
+heterogeneous gossip cluster (Phase 7-C-3), and tech-debt cleanup
+(Phase 7-C-4). See
+`docs/superpowers/specs/2026-04-20-phase7c2-cross-backend-correctness-design.md`.
+
 ## Phase 6-B status: Provenance Verification — complete
 
 Every forward pass now carries a hash-chained DAG of `ProvenanceEntry` records that

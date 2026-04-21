@@ -38,8 +38,15 @@ def test_pytorch_backend_mps_uses_fp16():
 
 
 def test_pytorch_backend_from_loaded_model_wraps_existing():
+    """Phase 7-C-1 Task 6b moved `num_layers()` from `config.num_hidden_layers`
+    to `len(_text_model(model).layers)` because the real multimodal
+    `Gemma4Config` doesn't expose `num_hidden_layers` at the top level.
+    MagicMock auto-creates `model.model.language_model` when accessed via
+    `getattr(inner, "language_model", inner)` — so `_text_model(model)`
+    returns the auto-created `language_model` child. Mock layers there
+    to simulate the multimodal-wrapper topology."""
     model = MagicMock()
-    model.config.num_hidden_layers = 30
+    model.model.language_model.layers = [object()] * 30
     b = PyTorchBackend.from_loaded_model(model, device="cpu")
     assert b._model is model
     assert b.num_layers() == 30
