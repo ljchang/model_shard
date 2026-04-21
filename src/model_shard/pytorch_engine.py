@@ -283,3 +283,19 @@ def bytes_to_tensor(raw: bytes, shape: list[int], dtype: int) -> torch.Tensor:
     buf = bytearray(raw)
     flat = torch.frombuffer(buf, dtype=torch_dt)
     return flat.reshape(shape)
+
+
+def top_k_ids_and_weights(
+    logits: torch.Tensor, k: int = 5,
+) -> tuple[list[int], list[float]]:
+    """Return the top-K token IDs and softmax probabilities from the last
+    position of a [B, L, V] logits tensor. Returns Python lists for
+    fixture serialization. ``k`` is clamped to the vocab size."""
+    last = logits[0, -1, :]
+    weights = torch.softmax(last.float(), dim=-1)
+    effective_k = min(k, last.shape[-1])
+    top_w, top_i = torch.topk(weights, k=effective_k)
+    return (
+        [int(x) for x in top_i.cpu().tolist()],
+        [float(w) for w in top_w.cpu().tolist()],
+    )

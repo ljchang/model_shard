@@ -230,6 +230,34 @@ def bytes_to_tensor(raw: bytes, shape: list[int], dtype: int) -> mx.array:
     return arr
 
 
+def top_k_ids_and_weights(
+    logits: mx.array, k: int = 5,
+) -> tuple[list[int], list[float]]:
+    """Return the top-K token IDs and softmax probabilities from the last
+    position of a [B, L, V] logits tensor. Mirror of
+    ``pytorch_engine.top_k_ids_and_weights``. Returns Python lists for
+    fixture serialization. ``k`` is clamped to the vocab size.
+
+    Implementation note: MLX's ``mx.topk`` returns values only in ascending
+    order, so we use ``argsort(-weights)`` to get indices in descending order
+    and then gather the weights. This keeps ids and weights aligned.
+    """
+    last = logits[0, -1, :]
+    weights = mx.softmax(last.astype(mx.float32), axis=-1)
+    effective_k = min(k, int(last.shape[-1]))
+    sorted_desc = mx.argsort(-weights)
+    top_i = sorted_desc[:effective_k]
+    top_w = weights[top_i]
+    # mx.array.tolist() returns a union (scalar for 0-d, list for n-d);
+    # both top_i and top_w are 1-d here so the list branch is guaranteed.
+    id_list: list[Any] = top_i.tolist()  # type: ignore[assignment]
+    weight_list: list[Any] = top_w.tolist()  # type: ignore[assignment]
+    return (
+        [int(x) for x in id_list],
+        [float(w) for w in weight_list],
+    )
+
+
 def load_model_partial(
     hf_id: str,
     held_experts_per_layer: dict[int, list[int]],
