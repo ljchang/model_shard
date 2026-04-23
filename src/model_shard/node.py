@@ -182,10 +182,13 @@ class Node:
             )
         else:
             b = _default_backend()
-            if b.name == "mlx":
-                hf_id = "mlx-community/gemma-4-26b-a4b-it-4bit"
-            else:
-                hf_id = "google/gemma-4-26B-A4B-it"
+            hf_id = shard_map.model_id
+            if not hf_id:
+                raise RuntimeError(
+                    "Node default-backend construction requires "
+                    "ShardMap.model_id to be set. Add `model_id` to your "
+                    "shards.yaml or construct the Node with an explicit backend."
+                )
             if _partial_load_enabled() and shard.moe_experts:
                 held = {L: list(ids) for L, ids in shard.moe_experts.items()}
                 b.load_partial(hf_id, held)

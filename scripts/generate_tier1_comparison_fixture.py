@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Phase 7-C-2: unified Tier-1 fixture generator for cross-backend comparison.
+"""Phase 7-C-2/7-C-3a: unified Tier-1 fixture generator for cross-backend comparison.
 
 Dispatches on ``MODEL_SHARD_BACKEND=mlx|pytorch`` (defaults to pytorch) and
 produces ``tests/fixtures/{mlx,pytorch}_tier1_tokens.json`` with top-K per
@@ -10,14 +10,17 @@ decode position. Consumed by:
     overlap between the two fixtures.
 
 Usage:
-    # On Mac (Apple Silicon):
-    MODEL_SHARD_BACKEND=mlx uv run python scripts/generate_tier1_comparison_fixture.py
+    # On Mac (Apple Silicon, MLX bf16):
+    MODEL_SHARD_BACKEND=mlx uv run python scripts/generate_tier1_comparison_fixture.py \\
+        --model /path/to/local/mlx-bf16-dir
 
-    # On DGX Spark (CUDA):
-    MODEL_SHARD_BACKEND=pytorch uv run python scripts/generate_tier1_comparison_fixture.py
+    # On DGX Spark (CUDA, PyTorch bf16):
+    MODEL_SHARD_BACKEND=pytorch uv run python scripts/generate_tier1_comparison_fixture.py \\
+        --model google/gemma-4-26B-A4B-it
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import threading
@@ -33,7 +36,18 @@ N_POSITIONS = 10
 TOP_K_RECORDED = 5
 
 
-def _load_backend() -> tuple[Any, str, str, str, Any]:
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--model",
+        required=True,
+        help="Backend-appropriate model id (HF id for PyTorch; HF id or "
+             "local MLX bf16 directory for MLX).",
+    )
+    return parser.parse_args()
+
+
+def _load_backend(hf_id: str) -> tuple[Any, str, str, str, Any]:
     """Return (backend, hf_id, device, dtype_str, topk_helper).
 
     topk_helper is the engine-specific ``top_k_ids_and_weights`` function
@@ -43,15 +57,13 @@ def _load_backend() -> tuple[Any, str, str, str, Any]:
         from model_shard import mlx_engine
         from model_shard.backends import MLXBackend
         backend = MLXBackend(mlx_lock=threading.Lock())
-        hf_id = "mlx-community/gemma-4-26b-a4b-it-4bit"
         device = "mps"
-        dtype_str = "mlx-4bit"
+        dtype_str = "mlx-bf16"
         topk = mlx_engine.top_k_ids_and_weights
     elif name == "pytorch":
         from model_shard import pytorch_engine
         from model_shard.backends import PyTorchBackend
         backend = PyTorchBackend()  # auto-detect cuda/mps/cpu
-        hf_id = "google/gemma-4-26B-A4B-it"
         device = backend._device
         dtype_str = str(backend._dtype).removeprefix("torch.")
         topk = pytorch_engine.top_k_ids_and_weights
@@ -93,7 +105,8 @@ def _greedy_decode_with_topk(
 
 
 def main() -> None:
-    backend, hf_id, device, dtype_str, topk = _load_backend()
+    args = _parse_args()
+    backend, hf_id, device, dtype_str, topk = _load_backend(args.model)
     backend_name: str = backend.name
 
     from transformers import AutoTokenizer

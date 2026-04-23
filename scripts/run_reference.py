@@ -2,6 +2,7 @@
 
 Usage:
     uv run python scripts/run_reference.py \\
+        --model google/gemma-4-26B-A4B-it \\
         --prompt-set tests/prompts.json \\
         --out-dir artifacts/ref \\
         --max-new-tokens 64
@@ -43,8 +44,8 @@ def main() -> None:
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument(
         "--model",
-        default="mlx-community/gemma-4-26b-a4b-it-4bit",
-        help="HuggingFace model ID (default: Phase 1 target)",
+        required=True,
+        help="HuggingFace model id or local path (no default — be explicit).",
     )
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument(

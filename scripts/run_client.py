@@ -36,15 +36,20 @@ def main() -> None:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--prompt-set", type=Path, required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
-    parser.add_argument("--model", default="mlx-community/gemma-4-26b-a4b-it-4bit")
+    parser.add_argument("--model", default=None)
     parser.add_argument("--max-new-tokens", type=int, default=64)
     args = parser.parse_args()
 
     shard_map = ShardMap.from_yaml(args.config)
+    model_id = args.model or shard_map.model_id
+    if not model_id:
+        parser.error(
+            "no model id available: pass --model or set model_id in shards.yaml"
+        )
     head_spec = shard_map.lookup(_find_head(shard_map))
 
     # Tokenizer only — no weights exercised here, all compute is on the Nodes.
-    _model, processor = mlx_vlm_load(args.model)
+    _model, processor = mlx_vlm_load(model_id)
     tokenizer = processor.tokenizer
 
     prompts = list(json.loads(args.prompt_set.read_text())["prompts"])
@@ -68,7 +73,7 @@ def main() -> None:
         )
 
     manifest = {
-        "model": args.model,
+        "model": model_id,
         "config": str(args.config),
         "max_new_tokens": args.max_new_tokens,
         "captured_at": datetime.now(UTC).isoformat(),

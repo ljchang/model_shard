@@ -2,13 +2,15 @@
 """Phase 7-B: manual DGX Spark smoke test.
 
 Run from an interactive shell on the Spark host:
-    MODEL_SHARD_BACKEND=pytorch uv run python scripts/spark_smoke_test.py
+    MODEL_SHARD_BACKEND=pytorch uv run python scripts/spark_smoke_test.py \\
+        --model google/gemma-4-26B-A4B-it
 
 Loads the model, does a 10-token completion, prints timing. Not a
 pytest — meant for humans to eyeball sanity after first deploy.
 """
 from __future__ import annotations
 
+import argparse
 import time
 
 import torch
@@ -18,13 +20,21 @@ from model_shard.backends import PyTorchBackend
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--model",
+        required=True,
+        help="HuggingFace model id or local path.",
+    )
+    args = parser.parse_args()
+    hf_id = args.model
+
     print(f"Torch: {torch.__version__}")
     print(f"CUDA available: {torch.cuda.is_available()}")
     if torch.cuda.is_available():
         print(f"Device: {torch.cuda.get_device_name(0)}")
         print(f"Compute capability: {torch.cuda.get_device_capability(0)}")
 
-    hf_id = "google/gemma-4-26B-A4B-it"
     tok = AutoTokenizer.from_pretrained(hf_id)
 
     t0 = time.time()

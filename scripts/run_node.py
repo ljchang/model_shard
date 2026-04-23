@@ -3,8 +3,7 @@
 Usage:
     uv run python scripts/run_node.py \\
         --config config/shards.yaml \\
-        --shard head \\
-        [--model mlx-community/gemma-4-26b-a4b-it-4bit]
+        --shard head
 
 Set SHARD_DRY_RUN=true to skip model loading (uses MagicMock); useful for
 membership/gossip tests that do not exercise inference.
@@ -89,7 +88,11 @@ def main() -> None:
     shard_group = parser.add_mutually_exclusive_group(required=True)
     shard_group.add_argument("--shard", dest="shard_id")
     shard_group.add_argument("--shard-id", dest="shard_id")
-    parser.add_argument("--model", default="mlx-community/gemma-4-26b-a4b-it-4bit")
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="Model id; if omitted, uses model_id from --config shards.yaml.",
+    )
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 
@@ -100,6 +103,11 @@ def main() -> None:
     log = logging.getLogger("run_node")
 
     shard_map = ShardMap.from_yaml(args.config)
+    model_id = args.model or shard_map.model_id
+    if not model_id:
+        parser.error(
+            "no model id available: pass --model or set model_id in shards.yaml"
+        )
     shard = shard_map.lookup(args.shard_id)
     # Derive total layer count from the map (max end_layer across shards).
     total_layers = max(
@@ -124,8 +132,8 @@ def main() -> None:
     else:
         from model_shard.mlx_engine import load_model
 
-        log.info("loading model %s", args.model)
-        lm = load_model(args.model)
+        log.info("loading model %s", model_id)
+        lm = load_model(model_id)
         log.info(
             "loaded: %d layers; serving shard %s layers [%d, %d) on %s:%d",
             lm.num_layers,
