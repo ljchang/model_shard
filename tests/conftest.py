@@ -13,17 +13,43 @@ import time
 from collections.abc import Iterator
 from contextlib import closing
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+from model_shard.shard_map import ShardMap
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_DEFAULT_SHARDS_YAML = _REPO_ROOT / "config" / "shards.yaml"
+
 
 @pytest.fixture(scope="session")
-def loaded_model() -> Any:
-    """Loads Gemma 4 26B A4B (4-bit) once per test session."""
+def shards_model_id() -> str:
+    """Cluster model id resolved from config/shards.yaml.
+
+    Tests that load the model should consume this fixture (or the
+    derived ``loaded_model`` fixture) instead of hardcoding the model
+    string. This makes the bf16 / 4-bit / future-quant choice a single
+    config edit, not a many-file find-and-replace."""
+    sm = ShardMap.from_yaml(_DEFAULT_SHARDS_YAML)
+    if not sm.model_id:
+        raise RuntimeError(
+            f"{_DEFAULT_SHARDS_YAML} has no model_id field; cannot resolve "
+            "test model. Add `model_id: <path-or-hf-id>` at the top of "
+            "shards.yaml."
+        )
+    return sm.model_id
+
+
+@pytest.fixture(scope="session")
+def loaded_model(shards_model_id: str) -> Any:
+    """Loads the cluster's canonical Gemma 4 26B A4B once per test session.
+
+    The model id is resolved from config/shards.yaml::model_id."""
     from model_shard.mlx_engine import load_model
 
-    return load_model("mlx-community/gemma-4-26b-a4b-it-4bit")
+    return load_model(shards_model_id)
 
 
 def _find_free_port() -> int:
