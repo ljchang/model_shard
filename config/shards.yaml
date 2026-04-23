@@ -2,6 +2,13 @@
 # across 3 localhost node processes. Phase 3 adds per-layer expert ownership.
 # Phase 4 overlaps experts 0, 1, 2 across two shards each to create
 # multi-candidate scenarios for load-aware routing.
+#
+# Phase 7-C-3a: model_id is the cluster-wide canonical model identifier.
+# For MLX backends, this is a local directory containing an MLX bf16 conversion
+# (produce one via scripts/convert_mlx_bf16.py). For PyTorch backends, this
+# is typically the gated HF id "google/gemma-4-26B-A4B-it".
+
+model_id: "/Users/lukechang/.cache/mlx-models/gemma-4-26b-a4b-it-bf16"
 
 shards:
   layer_0-10:

@@ -6,6 +6,7 @@ dynamically-updating map behind the same lookup() / all_shards() interface.
 
 Config format:
 
+    model_id: "<str>"   # cluster-wide canonical model id (HF id or local path)
     shards:
       <shard_id>:
         host: <str>
@@ -48,8 +49,19 @@ class ShardSpec:
 
 
 class ShardMap:
-    def __init__(self, entries: dict[str, ShardSpec]) -> None:
+    """Cluster-wide shard directory.
+
+    ``model_id`` is the cluster-wide canonical model identifier — either an HF
+    repo id (e.g. ``"google/gemma-4-26B-A4B-it"``) or a local directory path
+    for MLX bf16 conversions.  Currently non-required (defaults to ``""``);
+    Task 12 will promote it to required after all consumers migrate.
+    """
+
+    def __init__(
+        self, entries: dict[str, ShardSpec], model_id: str = ""
+    ) -> None:
         self._entries = dict(entries)
+        self.model_id = model_id
 
     def lookup(self, shard_id: str) -> ShardSpec:
         try:
@@ -68,6 +80,13 @@ class ShardMap:
         shards_cfg = raw["shards"]
         if not isinstance(shards_cfg, dict):
             raise ValueError(f"'shards' in {path} must be a mapping")
+
+        model_id_raw = raw.get("model_id", "")
+        if not isinstance(model_id_raw, str):
+            raise ValueError(
+                f"config {path}: model_id must be a string, got "
+                f"{type(model_id_raw).__name__}"
+            )
 
         entries: dict[str, ShardSpec] = {}
         for shard_id, spec in shards_cfg.items():
@@ -133,4 +152,4 @@ class ShardMap:
                 end_layer=end_layer,
                 moe_experts=moe_experts,
             )
-        return cls(entries)
+        return cls(entries, model_id=model_id_raw)
