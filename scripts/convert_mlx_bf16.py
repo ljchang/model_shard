@@ -7,7 +7,7 @@ in for either source or destination, so the user picks both.
 Usage (one-time, ~15-30 min on M5):
 
     uv run python scripts/convert_mlx_bf16.py \\
-        --hf-source google/gemma-4-26B-A4B-it \\
+        --hf-source <HF-id> \\
         --output-dir ~/.cache/mlx-models/gemma-4-26b-a4b-it-bf16
 
 Prerequisites:
@@ -25,7 +25,7 @@ def main() -> None:
     parser.add_argument(
         "--hf-source",
         required=True,
-        help="HuggingFace model id (e.g. google/gemma-4-26B-A4B-it).",
+        help="HuggingFace model id (gated; requires huggingface-cli login).",
     )
     parser.add_argument(
         "--output-dir",

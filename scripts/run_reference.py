@@ -2,7 +2,7 @@
 
 Usage:
     uv run python scripts/run_reference.py \\
-        --model google/gemma-4-26B-A4B-it \\
+        --model <HF-id-or-local-path> \\
         --prompt-set tests/prompts.json \\
         --out-dir artifacts/ref \\
         --max-new-tokens 64

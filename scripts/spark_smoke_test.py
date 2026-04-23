@@ -3,7 +3,7 @@
 
 Run from an interactive shell on the Spark host:
     MODEL_SHARD_BACKEND=pytorch uv run python scripts/spark_smoke_test.py \\
-        --model google/gemma-4-26B-A4B-it
+        --model <HF-id-or-local-path>
 
 Loads the model, does a 10-token completion, prints timing. Not a
 pytest — meant for humans to eyeball sanity after first deploy.

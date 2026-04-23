@@ -16,7 +16,7 @@ Usage:
 
     # On DGX Spark (CUDA, PyTorch bf16):
     MODEL_SHARD_BACKEND=pytorch uv run python scripts/generate_tier1_comparison_fixture.py \\
-        --model google/gemma-4-26B-A4B-it
+        --model <HF-id-or-local-path>
 """
 from __future__ import annotations
 
