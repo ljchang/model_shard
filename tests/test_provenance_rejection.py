@@ -33,7 +33,7 @@ def _find_free_port() -> int:
             s.close()
 
 
-def test_corrupted_chain_gets_rejected(monkeypatch):
+def test_corrupted_chain_gets_rejected(monkeypatch, shards_model_id: str):
     monkeypatch.setenv("ENABLE_PROVENANCE", "true")
     monkeypatch.setenv("ENABLE_GOSSIP", "true")
     monkeypatch.setenv("ENABLE_PARTIAL_LOAD", "false")
@@ -41,7 +41,7 @@ def test_corrupted_chain_gets_rejected(monkeypatch):
 
     # Load model once; shared across all three in-process nodes.
     from model_shard.mlx_engine import load_model
-    lm = load_model("mlx-community/gemma-4-26b-a4b-it-4bit")
+    lm = load_model(shards_model_id)
 
     ports = [_find_free_port() for _ in range(3)]
     specs = [

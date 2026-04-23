@@ -8,9 +8,9 @@ from model_shard.mlx_engine import load_model_partial
 
 
 @pytest.mark.slow
-def test_partial_load_slices_layer_experts() -> None:
+def test_partial_load_slices_layer_experts(shards_model_id: str) -> None:
     held = {15: [0, 3, 6, 9]}
-    lm = load_model_partial("mlx-community/gemma-4-26b-a4b-it-4bit", held)
+    lm = load_model_partial(shards_model_id, held)
 
     assert lm.num_layers == 30
     assert lm.held_ids_per_layer == {15: (0, 3, 6, 9)}

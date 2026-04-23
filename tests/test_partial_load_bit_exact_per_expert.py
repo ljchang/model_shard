@@ -12,11 +12,11 @@ from model_shard.moe import run_selected_experts
 
 
 @pytest.mark.slow
-def test_every_held_expert_matches_full_model(loaded_model: Any) -> None:
+def test_every_held_expert_matches_full_model(loaded_model: Any, shards_model_id: str) -> None:
     lm_full = loaded_model
     held_ids = [0, 3, 6, 9, 12, 15, 42, 127]
     lm_part = load_model_partial(
-        "mlx-community/gemma-4-26b-a4b-it-4bit",
+        shards_model_id,
         {15: held_ids},
     )
     try:

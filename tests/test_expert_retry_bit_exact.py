@@ -13,13 +13,12 @@ from model_shard.moe import run_selected_experts
 
 pytestmark = pytest.mark.slow
 
-_HF_ID = "mlx-community/gemma-4-26b-a4b-it-4bit"
 _LAYER = 15
 
 
 @pytest.fixture(scope="module")
-def lm():
-    return load_model(_HF_ID)
+def lm(shards_model_id: str):
+    return load_model(shards_model_id)
 
 
 class _SharedLmPeerRPC:

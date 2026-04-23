@@ -13,8 +13,8 @@ pytestmark = pytest.mark.slow
 
 
 @pytest.fixture(scope="module")
-def lm():
-    return load_model("mlx-community/gemma-4-26b-a4b-it-4bit")
+def lm(shards_model_id: str):
+    return load_model(shards_model_id)
 
 
 def test_compute_hash_deterministic_for_same_tensor(lm):

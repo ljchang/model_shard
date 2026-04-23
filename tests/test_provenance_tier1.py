@@ -48,7 +48,7 @@ def _wait_listening(host: str, port: int, timeout: float = 5.0) -> None:
     raise TimeoutError(f"{host}:{port} never came up")
 
 
-def test_tier1_tokens_match_with_provenance_on(monkeypatch: Any) -> None:
+def test_tier1_tokens_match_with_provenance_on(monkeypatch: Any, shards_model_id: str) -> None:
     if not MANIFEST.exists():
         pytest.skip(
             "reference artifacts missing -- run: "
@@ -87,7 +87,7 @@ def test_tier1_tokens_match_with_provenance_on(monkeypatch: Any) -> None:
     sm = ShardMap({s.shard_id: s for s in specs})
 
     from model_shard.mlx_engine import load_model
-    lm = load_model("mlx-community/gemma-4-26b-a4b-it-4bit")
+    lm = load_model(shards_model_id)
 
     nodes = [
         Node(shard=s, shard_map=sm, loaded_model=lm, total_layers=30)

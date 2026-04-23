@@ -27,13 +27,12 @@ def _ids_mod3(r: int) -> list[int]:
 
 
 @pytest.mark.slow
-def test_three_sliced_shards_compose_bit_exact(loaded_model: Any) -> None:
+def test_three_sliced_shards_compose_bit_exact(loaded_model: Any, shards_model_id: str) -> None:
     lm_full = loaded_model
-    hf_id = "mlx-community/gemma-4-26b-a4b-it-4bit"
     lm_shards = [
-        load_model_partial(hf_id, {15: _ids_mod3(0)}),
-        load_model_partial(hf_id, {15: _ids_mod3(1)}),
-        load_model_partial(hf_id, {15: _ids_mod3(2)}),
+        load_model_partial(shards_model_id, {15: _ids_mod3(0)}),
+        load_model_partial(shards_model_id, {15: _ids_mod3(1)}),
+        load_model_partial(shards_model_id, {15: _ids_mod3(2)}),
     ]
     try:
         layer_idx = 15

@@ -16,24 +16,23 @@ from model_shard.partial_load import attach_expert, slice_expert
 
 pytestmark = pytest.mark.slow
 
-_HF_ID = "mlx-community/gemma-4-26b-a4b-it-4bit"
 _LAYER = 15
 _MIGRATED_EXPERT = 3
 
 
 @pytest.fixture(scope="module")
-def lm_full():
-    return load_model(_HF_ID)
+def lm_full(shards_model_id: str):
+    return load_model(shards_model_id)
 
 
 @pytest.fixture(scope="module")
-def lm_a():
-    return load_model_partial(_HF_ID, {_LAYER: [0, 3, 6, 9]})
+def lm_a(shards_model_id: str):
+    return load_model_partial(shards_model_id, {_LAYER: [0, 3, 6, 9]})
 
 
 @pytest.fixture(scope="module")
-def lm_b():
-    return load_model_partial(_HF_ID, {_LAYER: [1, 4, 7, 10]})
+def lm_b(shards_model_id: str):
+    return load_model_partial(shards_model_id, {_LAYER: [1, 4, 7, 10]})
 
 
 def _synthetic_h(lm_full) -> mx.array:

@@ -13,13 +13,13 @@ from model_shard.moe import run_selected_experts
 
 
 @pytest.mark.slow
-def test_run_selected_experts_sliced_lm_returns_correct_outputs(loaded_model: Any) -> None:
+def test_run_selected_experts_sliced_lm_returns_correct_outputs(loaded_model: Any, shards_model_id: str) -> None:
     """Given the same input h, run_selected_experts on a sliced model for a
     held id returns the same tensor as on the full model for that id."""
     lm_full = loaded_model
     held_ids = [0, 3, 6, 9]
     lm_part = load_model_partial(
-        "mlx-community/gemma-4-26b-a4b-it-4bit",
+        shards_model_id,
         {15: held_ids},
     )
     try:
