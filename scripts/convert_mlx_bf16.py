@@ -1,8 +1,11 @@
 #!/usr/bin/env python
 """Phase 7-C-3a: convert HuggingFace Gemma 4 26B A4B (bf16) to MLX bf16.
 
-Wraps ``mlx_lm.convert`` with explicit CLI arguments — no defaults baked
-in for either source or destination, so the user picks both.
+Wraps ``mlx_vlm.convert`` with explicit CLI arguments — no defaults baked
+in for either source or destination, so the user picks both. Uses
+``mlx_vlm.convert`` (not ``mlx_lm.convert``) because Gemma 4 is a
+multimodal model whose loader (``mlx_vlm.load``) requires the vision
+tower weights even when only language inference is exercised.
 
 Usage (one-time, ~15-30 min on M5):
 
@@ -35,7 +38,13 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    from mlx_lm.convert import convert
+    # Gemma 4 is a multimodal VLM — use mlx_vlm.convert (NOT mlx_lm.convert)
+    # so the vision tower weights are preserved. Without them, mlx_vlm.load
+    # (in model_shard/mlx_engine.py::load_model) raises ValueError on
+    # missing vision_tower.* weights even though inference only walks the
+    # language model. Reference: mlx-community/gemma-4-26b-a4b-it-4bit was
+    # produced via mlx_vlm.convert for the same reason.
+    from mlx_vlm import convert
 
     args.output_dir = args.output_dir.expanduser().resolve()
     args.output_dir.parent.mkdir(parents=True, exist_ok=True)
