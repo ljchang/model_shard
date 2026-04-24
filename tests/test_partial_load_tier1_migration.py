@@ -58,7 +58,10 @@ def _wait_listening(host: str, port: int, timeout: float = 5.0) -> None:
 
 
 @pytest.fixture(scope="module")
-def three_node_pipeline_with_migration() -> Iterator[Any]:
+def three_node_pipeline_with_migration(shards_model_id: str) -> Iterator[Any]:
+    # Uses bf16 (shards_model_id) because this test compares distributed
+    # output against the bf16 Phase 1 oracle in artifacts/ref/. Partial
+    # load keeps per-Node memory small enough to fit 3 Nodes on M5.
     os.environ["ENABLE_EXPERT_SHARD"] = "true"
     os.environ["ENABLE_PARTIAL_LOAD"] = "true"
     os.environ["ENABLE_DYNAMIC_MIGRATION"] = "true"
@@ -86,7 +89,7 @@ def three_node_pipeline_with_migration() -> Iterator[Any]:
             moe_experts={15: _ids_mod3(2)},
         ),
     ]
-    shard_map = ShardMap({s.shard_id: s for s in specs})
+    shard_map = ShardMap({s.shard_id: s for s in specs}, model_id=shards_model_id)
 
     nodes = {
         spec.shard_id: Node(

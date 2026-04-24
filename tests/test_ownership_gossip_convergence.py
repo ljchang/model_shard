@@ -43,7 +43,7 @@ def gossip_env(monkeypatch):
     monkeypatch.setenv("ENABLE_GOSSIP", "true")
 
 
-def test_ownership_delta_propagates_within_three_rounds(gossip_env):
+def test_ownership_delta_propagates_within_three_rounds(gossip_env, shards_test_model_id: str):
     ports = [_free_port() for _ in range(3)]
     specs = [
         ShardSpec(
@@ -54,7 +54,7 @@ def test_ownership_delta_propagates_within_three_rounds(gossip_env):
         )
         for i, p in enumerate(ports)
     ]
-    sm = ShardMap({s.shard_id: s for s in specs})
+    sm = ShardMap({s.shard_id: s for s in specs}, model_id=shards_test_model_id)
     nodes = [Node(shard=s, shard_map=sm, total_layers=30) for s in specs]
     threads = [threading.Thread(target=n.serve_forever, daemon=True) for n in nodes]
     for t in threads:

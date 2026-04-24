@@ -28,7 +28,7 @@ def _find_free_port() -> int:
             s.close()
 
 
-def test_full_attach_evict_cycle_converges(monkeypatch):
+def test_full_attach_evict_cycle_converges(monkeypatch, shards_test_model_id: str):
     monkeypatch.setenv("ENABLE_PARTIAL_LOAD", "true")
     monkeypatch.setenv("ENABLE_DYNAMIC_MIGRATION", "false")  # drive migration manually
     monkeypatch.setenv("ENABLE_GOSSIP", "true")
@@ -49,7 +49,7 @@ def test_full_attach_evict_cycle_converges(monkeypatch):
                 moe_experts=s.moe_experts,
             )
         )
-    sm = ShardMap({s.shard_id: s for s in specs})
+    sm = ShardMap({s.shard_id: s for s in specs}, model_id=shards_test_model_id)
 
     nodes = [Node(shard=s, shard_map=sm, total_layers=30) for s in specs]
     threads = [threading.Thread(target=n.serve_forever, daemon=True) for n in nodes]

@@ -34,7 +34,7 @@ def _find_free_port() -> int:
             s.close()
 
 
-def test_evicted_expert_serves_wrong_shard_error(monkeypatch):
+def test_evicted_expert_serves_wrong_shard_error(monkeypatch, shards_test_model_id: str):
     """After eviction, subsequent ExpertRequest for the evicted expert
     returns ERR_WRONG_SHARD (not silent success, not hang)."""
     monkeypatch.setenv("ENABLE_PARTIAL_LOAD", "true")
@@ -55,7 +55,7 @@ def test_evicted_expert_serves_wrong_shard_error(monkeypatch):
                 start_layer=s.start_layer, end_layer=s.end_layer, moe_experts=s.moe_experts,
             )
         )
-    sm = ShardMap({s.shard_id: s for s in specs})
+    sm = ShardMap({s.shard_id: s for s in specs}, model_id=shards_test_model_id)
     nodes = [Node(shard=s, shard_map=sm, total_layers=30) for s in specs]
     threads = [threading.Thread(target=n.serve_forever, daemon=True) for n in nodes]
     for t in threads:

@@ -263,7 +263,7 @@ def three_node_pipeline_expert_split(
 
 
 @pytest.fixture(scope="module")
-def partial_load_fixture():
+def partial_load_fixture(shards_test_model_id: str):
     """Spin up a single Node with partial load at layer 15 = [0,3,6,9].
 
     Used by Phase 5b source-side and migration TCP tests."""
@@ -305,7 +305,10 @@ def partial_load_fixture():
         start_layer=0,
         end_layer=30,
     )
-    sm = ShardMap({"src": spec, "src-head": dummy_spec})
+    sm = ShardMap(
+        {"src": spec, "src-head": dummy_spec},
+        model_id=shards_test_model_id,
+    )
     node = Node(shard=spec, shard_map=sm, total_layers=30)
     t = _th.Thread(target=node.serve_forever, daemon=True)
     t.start()

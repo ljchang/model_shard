@@ -52,7 +52,11 @@ def _wait_listening(host: str, port: int, timeout: float = 5.0) -> None:
 
 
 @pytest.fixture(scope="module")
-def three_node_pipeline_partial_load() -> Iterator[Any]:
+def three_node_pipeline_partial_load(shards_model_id: str) -> Iterator[Any]:
+    # Uses bf16 (shards_model_id, NOT shards_test_model_id) because this
+    # test compares distributed output against the bf16 Phase 1 oracle in
+    # artifacts/ref/. Partial load keeps per-Node memory small (chassis +
+    # held experts only); 3 partial Nodes fit comfortably on a 128 GB M5.
     os.environ["ENABLE_EXPERT_SHARD"] = "true"
     os.environ["ENABLE_PARTIAL_LOAD"] = "true"
 
@@ -77,7 +81,7 @@ def three_node_pipeline_partial_load() -> Iterator[Any]:
             moe_experts={15: _ids_mod3(2)},
         ),
     ]
-    shard_map = ShardMap({s.shard_id: s for s in specs})
+    shard_map = ShardMap({s.shard_id: s for s in specs}, model_id=shards_model_id)
     # Each node loads its own sliced model via ENABLE_PARTIAL_LOAD.
     nodes = {
         spec.shard_id: Node(

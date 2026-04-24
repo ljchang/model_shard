@@ -30,7 +30,7 @@ def migration_env(monkeypatch):
     monkeypatch.setenv("ENABLE_GOSSIP", "false")
 
 
-def test_pull_over_tcp_matches_bit_exact(migration_env):
+def test_pull_over_tcp_matches_bit_exact(migration_env, shards_test_model_id: str):
     port_a = _free_port()
     port_b = _free_port()
 
@@ -42,7 +42,7 @@ def test_pull_over_tcp_matches_bit_exact(migration_env):
         shard_id="B", address=NodeAddress(host="127.0.0.1", port=port_b),
         start_layer=0, end_layer=30, moe_experts={15: (1, 4, 7, 10)},
     )
-    sm = ShardMap({"A": spec_a, "B": spec_b})
+    sm = ShardMap({"A": spec_a, "B": spec_b}, model_id=shards_test_model_id)
 
     node_a = Node(shard=spec_a, shard_map=sm, total_layers=30)
     node_b = Node(shard=spec_b, shard_map=sm, total_layers=30)
