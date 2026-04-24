@@ -1,4 +1,4 @@
-"""Phase 7-C-2 Task 5: cross-backend top-K agreement.
+"""Phase 7-C-2 / 7-C-3a: cross-backend top-K agreement.
 
 Compares the committed MLX and PyTorch tier-1 fixtures without loading
 any model. Pure JSON diff — runs anywhere (no Apple Silicon / CUDA
@@ -8,30 +8,32 @@ hosts).
 
 Agreement metric (graded, per spec §3.4):
 
-  * Min first-token top-1 matches: at least 1 of 3 prompts' position-0
-    top-1 tokens agree. The "The quick brown fox" case is deterministic
-    across backends because the last prompt token (37423 = " fox") has a
-    dominant next-token probability, so both backends agree regardless
-    of precision. This is the minimum expectation; if even this case
-    diverges, something is structurally wrong.
-  * Min average top-K overlap: average top-5 intersection size >= 0.5
-    across all (prompt, position) pairs. Calibrated to observed data
-    (see §7 of the design doc and the observed numbers below).
+  * Min first-token top-1 matches: 3 of 3 prompts' position-0 top-1
+    tokens agree. After the bf16 rebaseline (Phase 7-C-3a) MLX bf16
+    on M5 and PyTorch bf16 on Spark consume the same source weights,
+    so the position-0 distributions agree on top-1 across all prompts.
+    Any disagreement here means something structural broke.
+  * Min average top-K overlap: average top-5 intersection size >= 2.5
+    across all (prompt, position) pairs. The remaining drift comes from
+    MLX vs PyTorch kernel rounding differences and accumulating decode
+    divergence (positions 6+ on prompts that branch into low-confidence
+    paths see the worst overlap).
 
-Observed baseline at Phase 7-C-2 Task 5 landing (MLX 4-bit on M5 vs
-PyTorch bf16 on DGX Spark GB10, Gemma 4 26B A4B-it):
+Observed agreement post-Phase 7-C-3a (MLX bf16 on M5 vs PyTorch bf16 on
+DGX Spark GB10, both consuming google/gemma-4-26B-A4B-it):
 
-  * Position-0 top-1 matches: 1/3 prompts
-  * Average top-5 overlap: ~1.03 across 30 (prompt, position) pairs
+  * Position-0 top-1 matches: 3/3 prompts
+  * Average top-5 overlap: ~3.07 across 30 (prompt, position) pairs
 
-The 4-bit vs bf16 precision gap causes real token-level divergence on
-positions where multiple logits are close. Top-5 overlap ~1 on average
-is well above random (random on vocab=262144 would overlap ~0.0) but far
-from identical (top-5 on the same model would overlap at 5). This test
-asserts floors relative to observed agreement so a *regression* (e.g.,
-top-5 overlap falling to 0.3 because one backend's forward path
-silently broke) fails loudly. It is NOT a tight equivalence bar — that
-would contradict the known precision gap.
+The pre-rebaseline 4-bit-vs-bf16 numbers were 1/3 and ~1.03 respectively
+— the bf16 rebaseline closed most of that gap. The remaining drift is
+MLX/PyTorch implementation-level rounding, not weight-level precision.
+
+Floors are below observed values to leave headroom for normal kernel-
+rounding variance; tightening to "exact observed" would cause flaky
+failures from harmless reruns. A regression (e.g., one backend's
+forward path silently breaking) drops these numbers dramatically and
+fails loudly.
 
 Markdown side-by-side report is regenerated every test run at
 ``tests/fixtures/cross_backend_comparison.md``.
@@ -49,9 +51,11 @@ MLX_FIXTURE = FIXTURE_DIR / "mlx_tier1_tokens.json"
 PT_FIXTURE = FIXTURE_DIR / "pytorch_tier1_tokens.json"
 REPORT_FILE = FIXTURE_DIR / "cross_backend_comparison.md"
 
-# See docstring for rationale. These are floors, not targets.
-MIN_FIRST_TOKEN_TOP1_MATCHES = 1
-MIN_AVERAGE_TOPK_OVERLAP = 0.5
+# See docstring for rationale. These are floors, not targets. Tightened
+# in Phase 7-C-3a after the bf16 rebaseline closed the precision gap;
+# observed values are 3/3 first-token matches and ~3.07 avg top-5 overlap.
+MIN_FIRST_TOKEN_TOP1_MATCHES = 3
+MIN_AVERAGE_TOPK_OVERLAP = 2.5
 
 
 def _load_or_skip(path: Path, label: str) -> Any:
