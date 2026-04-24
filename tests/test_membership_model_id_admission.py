@@ -138,3 +138,29 @@ def test_admission_rejects_delta_bulk_install_with_mismatched_model_id():
     )
     state.recv(MembershipDeltaMsg(members=[new_peer]), now=1.0)
     assert "newcomer-from-delta" not in state.view()
+
+
+def test_runner_includes_local_model_id_in_self_record():
+    """MembershipRunner constructed with local_model_id surfaces it on
+    the self-record visible via state.view()."""
+    from model_shard.membership.runner import MembershipRunner
+
+    self_spec = PeerSpec(shard_id="self", host="127.0.0.1", udp_port=20001)
+    runner = MembershipRunner(
+        self_spec=self_spec,
+        peers=[],
+        config=SwimConfig(),
+        local_model_id="google/gemma-4-26B-A4B-it",
+    )
+    try:
+        # Access state via the runner. Use the public `state` property
+        # if it exists; otherwise reach into _state for the test.
+        state = getattr(runner, "state", None) or runner._state
+        view = state.view()
+        self_rec = view["self"]
+        assert self_rec.model_id == "google/gemma-4-26B-A4B-it"
+    finally:
+        # Clean up the UDPTransport socket if it opened.
+        transport = getattr(runner, "_transport", None)
+        if transport is not None and hasattr(transport, "stop"):
+            transport.stop()

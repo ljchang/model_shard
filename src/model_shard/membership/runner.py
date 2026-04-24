@@ -62,6 +62,7 @@ class MembershipRunner:
         peers: list[PeerSpec],
         config: SwimConfig,
         rng_seed: int | None = None,
+        local_model_id: str = "",
     ) -> None:
         self._cfg = config
         self._self_spec = self_spec
@@ -72,6 +73,7 @@ class MembershipRunner:
             peer_specs=peers,
             rng=self._rng,
             config=config,
+            local_model_id=local_model_id,
         )
         self._addr_by_id: dict[str, tuple[str, int]] = {
             self_spec.shard_id: (self_spec.host, self_spec.udp_port)

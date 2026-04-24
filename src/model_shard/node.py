@@ -1313,6 +1313,7 @@ class Node:
             self_spec=self_spec,
             peers=peer_specs,
             config=SwimConfig(),
+            local_model_id=self._shard_map.model_id,
         )
         # Bridge: relay gossip-received ownership deltas into our local
         # _ownership_view_internal so that Node.owners_of() sees changes
