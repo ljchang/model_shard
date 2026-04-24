@@ -13,14 +13,49 @@ Gemma 4 26B A4B specifics baked in:
   * final_logit_softcapping = 30.0.
 """
 
+import os as _os
 from dataclasses import dataclass, field
 from functools import partial
+from pathlib import Path as _Path
 from typing import Any
 
 import mlx.core as mx
 import numpy as np
 
 from model_shard._pb import wire_pb2
+
+# Phase 7-C-3b: conventional cache root for MLX bf16 conversions of HF
+# models. The convention is "<root>/<basename-of-hf-id>-bf16/" — e.g.,
+# "~/.cache/mlx-models/gemma-4-26b-a4b-it-bf16/" for HF id
+# "google/gemma-4-26B-A4B-it". Override via MLX_MODEL_BF16_LOCAL_PATH
+# env var.
+_MLX_MODEL_CACHE_ROOT: _Path = _Path(
+    _os.path.expanduser("~/.cache/mlx-models")
+)
+
+
+def _resolve_local_for_mlx(model_id: str) -> str:
+    """If model_id is an HF id and a local MLX bf16 conversion exists at
+    the conventional cache path, return the cache path; else return
+    model_id unchanged.
+
+    MLX_MODEL_BF16_LOCAL_PATH env var overrides the conventional path.
+    Used by the cluster admission contract (Phase 7-C-3b): all nodes
+    gossip the same canonical HF id, and the MLX backend transparently
+    loads from local cache when present."""
+    override = _os.environ.get("MLX_MODEL_BF16_LOCAL_PATH")
+    if override:
+        return override
+    # If the input looks like an existing local path, pass through.
+    p = _Path(model_id)
+    if p.exists() and p.is_dir():
+        return model_id
+    # If it's an HF id and we have a cache hit, return the cache path.
+    basename = model_id.rsplit("/", 1)[-1].lower()
+    cache_dir = _MLX_MODEL_CACHE_ROOT / f"{basename}-bf16"
+    if cache_dir.exists() and cache_dir.is_dir():
+        return str(cache_dir)
+    return model_id
 
 
 @dataclass
@@ -45,7 +80,8 @@ def _softcap(softcap: float, x: mx.array) -> mx.array:
 def load_model(hf_id: str) -> LoadedModel:
     from mlx_vlm import load
 
-    model, processor = load(hf_id)
+    resolved = _resolve_local_for_mlx(hf_id)
+    model, processor = load(resolved)
     language_model = model.language_model
     text_model = language_model.model
     return LoadedModel(
