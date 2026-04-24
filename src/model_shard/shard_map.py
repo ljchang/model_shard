@@ -53,8 +53,8 @@ class ShardMap:
 
     ``model_id`` is the cluster-wide canonical model identifier — either an HF
     repo id (e.g. ``"google/gemma-4-26B-A4B-it"``) or a local directory path
-    for MLX bf16 conversions.  Currently non-required (defaults to ``""``);
-    Task 12 will promote it to required after all consumers migrate.
+    for MLX bf16 conversions.  Required: ``from_yaml`` raises ``ValueError`` if
+    the ``model_id`` field is absent or empty.
     """
 
     def __init__(
@@ -81,11 +81,15 @@ class ShardMap:
         if not isinstance(shards_cfg, dict):
             raise ValueError(f"'shards' in {path} must be a mapping")
 
-        model_id_raw = raw.get("model_id", "")
-        if not isinstance(model_id_raw, str):
+        model_id_raw = raw.get("model_id")
+        if model_id_raw is None:
             raise ValueError(
-                f"config {path}: model_id must be a string, got "
-                f"{type(model_id_raw).__name__}"
+                f"config {path}: 'model_id' top-level field is required"
+            )
+        if not isinstance(model_id_raw, str) or not model_id_raw:
+            raise ValueError(
+                f"config {path}: model_id must be a non-empty string, "
+                f"got {model_id_raw!r}"
             )
 
         entries: dict[str, ShardSpec] = {}

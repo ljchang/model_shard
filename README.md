@@ -273,6 +273,49 @@ heterogeneous gossip cluster (Phase 7-C-3), and tech-debt cleanup
 (Phase 7-C-4). See
 `docs/superpowers/specs/2026-04-20-phase7c2-cross-backend-correctness-design.md`.
 
+## Phase 7-C-3a status: Bf16 Canonical Rebaseline — complete
+
+Phase 7-C-3a replaces the 4-bit MLX path (`mlx-community/gemma-4-26b-a4b-it-4bit`)
+as the canonical Mac model with a local bf16 conversion produced once
+from `google/gemma-4-26B-A4B-it` — the same HuggingFace source the
+PyTorch path uses on DGX Spark. After the rebaseline, MLX (Mac) and
+PyTorch (Spark) consume the same source weights, and cross-backend
+top-K agreement jumped from 1/3 position-0 top-1 matches and 1.03
+average top-5 overlap (the 4-bit-vs-bf16 baseline) to 3/3 and 3.07
+respectively. The remaining drift is MLX/PyTorch kernel rounding,
+not weight-level precision.
+
+Conversion is one-time via `scripts/convert_mlx_bf16.py` (no defaults
+baked in: `--hf-source` and `--output-dir` are both required CLI args).
+The script wraps `mlx_vlm.convert` (not `mlx_lm.convert`) so the
+multimodal Gemma 4 layout — vision tower included — is preserved;
+`mlx_vlm.load` requires it even when only language inference is
+exercised. Output disk: ~48 GB.
+
+All hardcoded model-id string literals were removed from code:
+`config/shards.yaml::model_id` is now the single source of truth and
+required at YAML-load time. `ShardMap.model_id` is exposed as a
+required field; `Node` default-backend construction reads it from the
+shard map and raises if absent. Sixteen call sites across one source
+file (`node.py`), four scripts (`run_node.py`, `run_client.py`,
+`run_reference.py`, `generate_tier1_comparison_fixture.py`), eleven
+test files, and the test conftest were swept.
+
+Multi-load bit-exactness tests (split equivalence, per-expert bit-exact,
+migration bit-exact) opt into a parallel `config/shards.tests.yaml`
+that points at the smaller 4-bit MLX model — three or four full-bf16
+model instances in one Python process don't fit comfortably on a
+128 GB M5, but the math under test is precision-independent. Production
+cluster (`config/shards.yaml`) stays on bf16. All Phase 1–6 slow
+buckets and the Phase 7-A backend regression are green on the new
+baseline; the cross-backend test floors are tightened to the post-
+rebaseline observed values. Two heavy E2E tests
+(`test_partial_load_tier1_e2e.py`, `test_partial_load_tier1_migration.py`)
+that load three partial-bf16 Nodes in one pytest process are documented
+as redundant with faster bit-exact unit tests and skipped from the
+default slow run; they remain runnable manually. See
+`docs/superpowers/specs/2026-04-23-phase7c3a-bf16-rebaseline-design.md`.
+
 ## Phase 6-B status: Provenance Verification — complete
 
 Every forward pass now carries a hash-chained DAG of `ProvenanceEntry` records that

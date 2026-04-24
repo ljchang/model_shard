@@ -73,6 +73,7 @@ def test_shard_map_load_yaml_with_layer_ranges(tmp_path: Path) -> None:
     cfg = tmp_path / "shards.yaml"
     cfg.write_text(
         """
+model_id: "/tmp/fake-model"
 shards:
   layer_0-10:
     host: 127.0.0.1
@@ -115,6 +116,7 @@ def test_shard_map_yaml_rejects_missing_host_or_port(tmp_path: Path) -> None:
     cfg = tmp_path / "shards.yaml"
     cfg.write_text(
         """
+model_id: "/tmp/fake-model"
 shards:
   broken:
     host: 127.0.0.1
@@ -130,6 +132,7 @@ def test_shard_map_yaml_rejects_missing_layer_range(tmp_path: Path) -> None:
     cfg = tmp_path / "shards.yaml"
     cfg.write_text(
         """
+model_id: "/tmp/fake-model"
 shards:
   broken:
     host: 127.0.0.1
@@ -144,6 +147,7 @@ def test_shard_map_yaml_rejects_bad_port_type(tmp_path: Path) -> None:
     cfg = tmp_path / "shards.yaml"
     cfg.write_text(
         """
+model_id: "/tmp/fake-model"
 shards:
   bad:
     host: 127.0.0.1
@@ -160,6 +164,7 @@ def test_shard_map_yaml_rejects_inverted_layer_range(tmp_path: Path) -> None:
     cfg = tmp_path / "shards.yaml"
     cfg.write_text(
         """
+model_id: "/tmp/fake-model"
 shards:
   bad:
     host: 127.0.0.1
@@ -194,6 +199,7 @@ def test_shard_spec_udp_port_is_tcp_port_plus_1000() -> None:
 def test_shard_spec_moe_experts_optional(tmp_path: Path) -> None:
     cfg = tmp_path / "s.yaml"
     cfg.write_text(
+        "model_id: \"/tmp/fake-model\"\n"
         "shards:\n"
         "  a:\n"
         "    host: 127.0.0.1\n"
@@ -208,6 +214,7 @@ def test_shard_spec_moe_experts_optional(tmp_path: Path) -> None:
 def test_shard_spec_moe_experts_parsed(tmp_path: Path) -> None:
     cfg = tmp_path / "s.yaml"
     cfg.write_text(
+        "model_id: \"/tmp/fake-model\"\n"
         "shards:\n"
         "  a:\n"
         "    host: 127.0.0.1\n"
@@ -226,6 +233,7 @@ def test_shard_spec_moe_experts_parsed(tmp_path: Path) -> None:
 def test_shard_spec_moe_experts_rejects_non_int_layer_key(tmp_path: Path) -> None:
     cfg = tmp_path / "s.yaml"
     cfg.write_text(
+        "model_id: \"/tmp/fake-model\"\n"
         "shards:\n"
         "  a:\n"
         "    host: 127.0.0.1\n"
