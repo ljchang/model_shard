@@ -29,6 +29,7 @@ def test_member_record_is_immutable_dataclass() -> None:
         udp_port=10001,
         state=MemberState.ALIVE,
         incarnation=0,
+        model_id="",
         last_state_change=0.0,
         suspect_deadline=None,
     )
@@ -41,7 +42,7 @@ def test_member_record_is_immutable_dataclass() -> None:
 
 
 def test_state_transition_carries_old_and_new() -> None:
-    rec = MemberRecord("x", "127.0.0.1", 10001, MemberState.SUSPECT, 3, 1.0, 5.0)
+    rec = MemberRecord("x", "127.0.0.1", 10001, MemberState.SUSPECT, 3, "", 1.0, 5.0)
     t = StateTransition(
         shard_id="x",
         old_state=MemberState.ALIVE,
@@ -53,7 +54,7 @@ def test_state_transition_carries_old_and_new() -> None:
 
 
 def test_message_dataclasses_construct() -> None:
-    rec = MemberRecord("x", "127.0.0.1", 10001, MemberState.ALIVE, 0, 0.0, None)
+    rec = MemberRecord("x", "127.0.0.1", 10001, MemberState.ALIVE, 0, "", 0.0, None)
     PingMsg(from_shard_id="a", from_incarnation=2, deltas=[rec])
     AckMsg(from_shard_id="a", from_incarnation=2, deltas=[rec])
     PingReqMsg(from_shard_id="a", target_shard_id="b", probe_id="p1", deltas=[])

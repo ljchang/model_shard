@@ -46,6 +46,7 @@ def test_observer_poisons_active_head_states():
     rec = MemberRecord(
         shard_id="tail", host="127.0.0.1", udp_port=31201,
         state=MemberState.SUSPECT, incarnation=1,
+        model_id="",
         last_state_change=0.0, suspect_deadline=None,
     )
     transition = StateTransition(

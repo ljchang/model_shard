@@ -89,6 +89,7 @@ class MembershipState:
                 udp_port=p.udp_port,
                 state=MemberState.ALIVE,
                 incarnation=0,
+                model_id="",
                 last_state_change=0.0,
                 suspect_deadline=None,
             )
@@ -267,6 +268,7 @@ class MembershipState:
             udp_port=rec.udp_port,
             state=MemberState.ALIVE,
             incarnation=rec.incarnation,
+            model_id=rec.model_id,
             last_state_change=now,
             suspect_deadline=None,
         )
@@ -352,6 +354,7 @@ class MembershipState:
             udp_port=prev.udp_port,
             state=MemberState.SUSPECT,
             incarnation=prev.incarnation,
+            model_id=prev.model_id,
             last_state_change=now,
             suspect_deadline=now + self._cfg.t_suspect_ms / 1000.0,
         )
@@ -378,6 +381,7 @@ class MembershipState:
                     udp_port=rec.udp_port,
                     state=MemberState.DEAD,
                     incarnation=rec.incarnation,
+                    model_id=rec.model_id,
                     last_state_change=now,
                     suspect_deadline=None,
                 )
@@ -435,6 +439,7 @@ class MembershipState:
             udp_port=prev.udp_port,
             state=MemberState.ALIVE,
             incarnation=self._self_incarnation,
+            model_id=prev.model_id,
             last_state_change=now,
             suspect_deadline=None,
         )
@@ -462,6 +467,7 @@ class MembershipState:
             udp_port=prev.udp_port,
             state=d.state,
             incarnation=d.incarnation,
+            model_id=d.model_id,
             last_state_change=now,
             suspect_deadline=(
                 now + self._cfg.t_suspect_ms / 1000.0

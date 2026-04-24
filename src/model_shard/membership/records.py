@@ -28,6 +28,7 @@ class MemberRecord:
     udp_port: int
     state: MemberState
     incarnation: int
+    model_id: str  # Phase 7-C-3b: cluster admission contract; "" = legacy/unset
     last_state_change: float = field(compare=False)
     suspect_deadline: float | None = field(compare=False)  # set iff state == SUSPECT
 

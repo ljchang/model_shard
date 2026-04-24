@@ -53,6 +53,7 @@ def bootstrap_sequential(
         udp_port=self_spec.udp_port,
         state=MemberState.ALIVE,
         incarnation=0,
+        model_id="",
         last_state_change=0.0,
         suspect_deadline=None,
     )

@@ -25,6 +25,7 @@ def _rec(shard_id: str, state: MemberState = MemberState.ALIVE) -> MemberRecord:
         udp_port=10001,
         state=state,
         incarnation=3,
+        model_id="",
         last_state_change=1.0,
         suspect_deadline=None,
     )

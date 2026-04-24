@@ -355,6 +355,7 @@ def _suspect_self_record(self_id: str, incarnation: int) -> MemberRecord:
         udp_port=10000,
         state=MemberState.SUSPECT,
         incarnation=incarnation,
+        model_id="",
         last_state_change=10.0,
         suspect_deadline=14.0,
     )
@@ -396,6 +397,7 @@ def test_refutation_floors_to_higher_incarnation_after_restart() -> None:
         udp_port=10000,
         state=MemberState.DEAD,
         incarnation=5,
+        model_id="",
         last_state_change=10.0,
         suspect_deadline=None,
     )
@@ -419,6 +421,7 @@ def test_stale_gossip_about_self_at_lower_incarnation_is_ignored() -> None:
                     udp_port=10000,
                     state=MemberState.SUSPECT,
                     incarnation=4,
+                    model_id="",
                     last_state_change=1.0,
                     suspect_deadline=5.0,
                 )
@@ -439,6 +442,7 @@ def test_stale_gossip_about_self_at_lower_incarnation_is_ignored() -> None:
                     udp_port=10000,
                     state=MemberState.DEAD,
                     incarnation=2,
+                    model_id="",
                     last_state_change=2.0,
                     suspect_deadline=None,
                 )
@@ -452,7 +456,7 @@ def test_stale_gossip_about_self_at_lower_incarnation_is_ignored() -> None:
 
 def test_same_incarnation_dead_overrides_alive() -> None:
     # n1 currently alive at inc=0. Gossip says n1 dead at inc=0.
-    dead_n1 = MemberRecord("n1", "127.0.0.1", 10001, MemberState.DEAD, 0, 5.0, None)
+    dead_n1 = MemberRecord("n1", "127.0.0.1", 10001, MemberState.DEAD, 0, "", 5.0, None)
     s2 = make_state(self_id="me", peers=("n1", "src"))
     s2.recv(
         PingMsg(from_shard_id="src", from_incarnation=0, deltas=[dead_n1]),
@@ -464,7 +468,7 @@ def test_same_incarnation_dead_overrides_alive() -> None:
 def test_same_incarnation_suspect_overrides_alive() -> None:
     s = make_state(self_id="me", peers=("n1", "src"))
     suspect = MemberRecord(
-        "n1", "127.0.0.1", 10001, MemberState.SUSPECT, 0, 5.0, 9.0
+        "n1", "127.0.0.1", 10001, MemberState.SUSPECT, 0, "", 5.0, 9.0
     )
     s.recv(
         PingMsg(from_shard_id="src", from_incarnation=0, deltas=[suspect]),
@@ -476,20 +480,20 @@ def test_same_incarnation_suspect_overrides_alive() -> None:
 def test_same_incarnation_alive_does_not_override_dead() -> None:
     s = make_state(self_id="me", peers=("n1", "src"))
     # First mark n1 dead via gossip at inc=2.
-    dead = MemberRecord("n1", "127.0.0.1", 10001, MemberState.DEAD, 2, 1.0, None)
+    dead = MemberRecord("n1", "127.0.0.1", 10001, MemberState.DEAD, 2, "", 1.0, None)
     s.recv(PingMsg(from_shard_id="src", from_incarnation=0, deltas=[dead]), now=1.0)
     assert s.view()["n1"].state == MemberState.DEAD
     # Now alive gossip at the same inc must not resurrect.
-    alive = MemberRecord("n1", "127.0.0.1", 10001, MemberState.ALIVE, 2, 2.0, None)
+    alive = MemberRecord("n1", "127.0.0.1", 10001, MemberState.ALIVE, 2, "", 2.0, None)
     s.recv(PingMsg(from_shard_id="src", from_incarnation=0, deltas=[alive]), now=2.0)
     assert s.view()["n1"].state == MemberState.DEAD
 
 
 def test_higher_incarnation_alive_does_resurrect_dead() -> None:
     s = make_state(self_id="me", peers=("n1", "src"))
-    dead = MemberRecord("n1", "127.0.0.1", 10001, MemberState.DEAD, 2, 1.0, None)
+    dead = MemberRecord("n1", "127.0.0.1", 10001, MemberState.DEAD, 2, "", 1.0, None)
     s.recv(PingMsg(from_shard_id="src", from_incarnation=0, deltas=[dead]), now=1.0)
-    alive = MemberRecord("n1", "127.0.0.1", 10001, MemberState.ALIVE, 3, 2.0, None)
+    alive = MemberRecord("n1", "127.0.0.1", 10001, MemberState.ALIVE, 3, "", 2.0, None)
     s.recv(PingMsg(from_shard_id="src", from_incarnation=0, deltas=[alive]), now=2.0)
     assert s.view()["n1"].state == MemberState.ALIVE
     assert s.view()["n1"].incarnation == 3
@@ -498,7 +502,7 @@ def test_higher_incarnation_alive_does_resurrect_dead() -> None:
 def test_outgoing_pings_carry_recent_transitions_in_deltas() -> None:
     s = make_state(self_id="me", peers=("n1", "src", "n2"), seed=0)
     # Mark n2 dead via incoming gossip → that adds a transition to the backlog.
-    dead = MemberRecord("n2", "127.0.0.1", 10003, MemberState.DEAD, 5, 1.0, None)
+    dead = MemberRecord("n2", "127.0.0.1", 10003, MemberState.DEAD, 5, "", 1.0, None)
     s.recv(PingMsg(from_shard_id="src", from_incarnation=0, deltas=[dead]), now=1.0)
     # Drive a protocol period; expect outgoing Ping to carry the n2-dead delta.
     out = s.tick(now=1.0)
@@ -518,7 +522,7 @@ def test_backlog_caps_at_k_gossip_per_message() -> None:
     )
     # Inject 4 transitions (more than K_GOSSIP).
     for i, name in enumerate(("a", "b", "c", "d")):
-        d = MemberRecord(name, "127.0.0.1", 10001 + i, MemberState.DEAD, 1, 1.0, None)
+        d = MemberRecord(name, "127.0.0.1", 10001 + i, MemberState.DEAD, 1, "", 1.0, None)
         s.recv(PingMsg(from_shard_id="src", from_incarnation=0, deltas=[d]), now=1.0)
     out = s.tick(now=1.0)
     pings = [m for m in out if isinstance(m.payload, PingMsg)]
@@ -531,8 +535,8 @@ def test_backlog_caps_at_k_gossip_per_message() -> None:
 def test_backlog_drains_oldest_first_across_calls() -> None:
     cfg = SwimConfig(k_gossip=1)
     s = make_state(self_id="me", peers=("a", "b", "src"), seed=0, cfg=cfg)
-    da = MemberRecord("a", "127.0.0.1", 10001, MemberState.DEAD, 1, 1.0, None)
-    db = MemberRecord("b", "127.0.0.1", 10002, MemberState.DEAD, 1, 1.0, None)
+    da = MemberRecord("a", "127.0.0.1", 10001, MemberState.DEAD, 1, "", 1.0, None)
+    db = MemberRecord("b", "127.0.0.1", 10002, MemberState.DEAD, 1, "", 1.0, None)
     s.recv(PingMsg(from_shard_id="src", from_incarnation=0, deltas=[da]), now=1.0)
     s.recv(PingMsg(from_shard_id="src", from_incarnation=0, deltas=[db]), now=1.0)
     # Two ticks should drain a, then b.
@@ -558,6 +562,7 @@ def test_recv_join_emits_membership_delta_with_full_view() -> None:
         udp_port=10099,
         state=MemberState.ALIVE,
         incarnation=0,
+        model_id="",
         last_state_change=0.0,
         suspect_deadline=None,
     )
@@ -579,6 +584,7 @@ def test_recv_join_installs_unknown_newcomer_in_view() -> None:
         udp_port=10099,
         state=MemberState.ALIVE,
         incarnation=0,
+        model_id="",
         last_state_change=0.0,
         suspect_deadline=None,
     )
@@ -591,7 +597,7 @@ def test_gossip_about_unknown_shard_id_is_dropped(caplog: Any) -> None:
     import logging
     s = make_state(self_id="me", peers=("n1", "src"))
     ghost = MemberRecord(
-        "ghost-shard", "10.0.0.99", 10099, MemberState.ALIVE, 0, 1.0, None
+        "ghost-shard", "10.0.0.99", 10099, MemberState.ALIVE, 0, "", 1.0, None
     )
     with caplog.at_level(logging.WARNING, logger="model_shard.membership.state"):
         s.recv(

@@ -69,7 +69,7 @@ def test_admission_rejects_when_a_peer_is_dead(monkeypatch: pytest.MonkeyPatch) 
     assert n.membership is not None
     members = n.membership.state._members
     members["mid"] = MemberRecord(
-        "mid", "127.0.0.1", 20002, MemberState.DEAD, 1, 0.0, None
+        "mid", "127.0.0.1", 20002, MemberState.DEAD, 1, "", 0.0, None
     )
 
     # Build an in-memory client stream and a BeginRequest.
@@ -142,7 +142,7 @@ def test_observer_closes_outbound_on_peer_going_suspect(monkeypatch: pytest.Monk
     n._out_stream = MagicMock(close=closed)
     n._out_sock = MagicMock(close=MagicMock())
 
-    new_rec = MemberRecord("mid", "127.0.0.1", 20002, MemberState.SUSPECT, 0, 0.0, 4.0)
+    new_rec = MemberRecord("mid", "127.0.0.1", 20002, MemberState.SUSPECT, 0, "", 0.0, 4.0)
     n._on_membership_change(
         StateTransition(shard_id="mid", old_state=MemberState.ALIVE, new_record=new_rec)
     )

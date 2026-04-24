@@ -32,6 +32,7 @@ def _record_to_pb(r: MemberRecord) -> wire_pb2.MemberRecordPb:
         udp_port=r.udp_port,
         state=int(r.state),
         incarnation=r.incarnation,
+        model_id=r.model_id,
     )
 
 
@@ -42,6 +43,7 @@ def _record_from_pb(pb: wire_pb2.MemberRecordPb) -> MemberRecord:
         udp_port=int(pb.udp_port),
         state=MemberState(int(pb.state)),
         incarnation=int(pb.incarnation),
+        model_id=str(pb.model_id),
         last_state_change=0.0,  # wire does not transport this; receiver re-stamps
         suspect_deadline=None,  # similarly, deadlines are recomputed locally
     )
