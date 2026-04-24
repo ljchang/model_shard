@@ -73,11 +73,13 @@ class MembershipState:
         peer_specs: list[PeerSpec],
         rng: random.Random,
         config: SwimConfig,
+        local_model_id: str = "",
     ) -> None:
         self._self_id = self_spec.shard_id
         self._self_incarnation = 0
         self._cfg = config
         self._rng = rng
+        self._local_model_id = local_model_id  # Phase 7-C-3b
         self._addrs: dict[str, PeerSpec] = {self_spec.shard_id: self_spec}
         for p in peer_specs:
             self._addrs[p.shard_id] = p
@@ -89,7 +91,7 @@ class MembershipState:
                 udp_port=p.udp_port,
                 state=MemberState.ALIVE,
                 incarnation=0,
-                model_id="",
+                model_id=self._local_model_id if p.shard_id == self._self_id else "",
                 last_state_change=0.0,
                 suspect_deadline=None,
             )
@@ -259,8 +261,32 @@ class MembershipState:
             return self._handle_delta(msg, now)
         return []
 
+    def _admit(self, record: MemberRecord) -> bool:
+        """Phase 7-C-3b cluster admission contract.
+
+        Reject peers whose model_id doesn't match the local node's. The
+        "if local is empty, accept any peer" branch is intentional
+        permissiveness during rolling upgrade — once production is fully
+        on Phase 7-C-3b, every node sets model_id and there's no
+        permissive case."""
+        if not self._local_model_id:
+            return True
+        if record.model_id != self._local_model_id:
+            _LOG.warning(
+                "rejecting peer %s with model_id mismatch: "
+                "local=%r peer=%r",
+                record.shard_id, self._local_model_id, record.model_id,
+            )
+            return False
+        return True
+
     def _handle_join(self, msg: JoinMsg, now: float) -> list[OutgoingMessage]:
         rec = msg.self_record
+        if not self._admit(rec):
+            # Rejected — don't install, don't echo back. Newcomer sees no
+            # response and either retries (with corrected model_id) or
+            # times out trying to join.
+            return []
         prev = self._members.get(rec.shard_id)
         installed = MemberRecord(
             shard_id=rec.shard_id,
@@ -304,6 +330,8 @@ class MembershipState:
                 continue
             prev = self._members.get(rec.shard_id)
             if prev is None:
+                if not self._admit(rec):
+                    continue
                 self._members[rec.shard_id] = rec
                 self._transitions.append(
                     StateTransition(
@@ -454,6 +482,8 @@ class MembershipState:
         self._enqueue_backlog(new, now)
 
     def _maybe_apply_peer_delta(self, d: MemberRecord, now: float) -> None:
+        if not self._admit(d):
+            return
         prev = self._members[d.shard_id]
         if d.incarnation < prev.incarnation:
             return
