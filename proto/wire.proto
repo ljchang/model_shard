@@ -135,6 +135,10 @@ message MemberRecordPb {
   // 0 = alive, 1 = suspect, 2 = dead. Must match records.MemberState ordering.
   uint32 state = 4;
   uint64 incarnation = 5;
+  // Phase 7-C-3b: cluster admission contract. Each node gossips its
+  // model_id; receivers refuse peers with mismatched id. Empty string
+  // means "not set" (legacy nodes).
+  string model_id = 6;
 }
 
 message Ping {
