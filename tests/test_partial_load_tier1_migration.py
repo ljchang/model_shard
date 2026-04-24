@@ -134,7 +134,13 @@ def test_tier1_with_migration_enabled(
     three_node_pipeline_with_migration: Any,
     prompt_idx: int,
 ) -> None:
-    """Token ids must be bit-exact with Phase 1 reference while migration scanner runs."""
+    """Token ids must be bit-exact with Phase 1 reference while migration scanner runs.
+
+    Phase 7-C-3a note: heavy on bf16 (3 partial-bf16 Node instances + migration
+    scanner running in one pytest process). Migration's bit-exactness invariant
+    is also covered by tests/test_migration_bit_exact_per_expert.py and
+    tests/test_migration_over_tcp.py — both fast. Run this E2E test manually
+    when needed."""
     if not MANIFEST.exists():
         pytest.skip("reference manifest missing")
     manifest = json.loads(MANIFEST.read_text())

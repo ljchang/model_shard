@@ -116,6 +116,11 @@ def test_tier1_under_partial_load(
     three_node_pipeline_partial_load: Any,
     prompt_idx: int,
 ) -> None:
+    # Phase 7-C-3a note: heavy on bf16 (3 partial-bf16 Node instances in one
+    # pytest process). The bit-exactness invariant under partial load is also
+    # covered by tests/test_partial_load_split_equivalence.py and the unit
+    # tests in tests/test_partial_load_bit_exact_per_expert.py — both run in
+    # ~10s on the 4-bit test model. Run this E2E test manually when needed.
     if not MANIFEST.exists():
         pytest.skip("reference manifest missing")
     manifest = json.loads(MANIFEST.read_text())
