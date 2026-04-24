@@ -93,6 +93,17 @@ def test_admission_accepts_when_local_empty():
     assert view["peer"].incarnation == 2
 
 
+def test_admission_accepts_when_both_empty():
+    """Legacy ↔ legacy compatibility: if neither side sets model_id,
+    admission applies via the permissive local-empty branch — same code
+    path as when local is empty and peer has any value."""
+    state = _make_state(local_model_id="")
+    rec = _peer_record(model_id="", incarnation=2)
+    state._maybe_apply_peer_delta(rec, now=1.0)
+    view = state.view()
+    assert view["peer"].incarnation == 2
+
+
 def test_admission_rejects_join_with_mismatched_model_id():
     """A JoinMsg from a newcomer with mismatched model_id is dropped:
     no response sent, no record installed."""

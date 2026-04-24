@@ -269,6 +269,8 @@ class MembershipState:
         permissiveness during rolling upgrade — once production is fully
         on Phase 7-C-3b, every node sets model_id and there's no
         permissive case."""
+        # Rolling-upgrade fallback — see docstring; do NOT remove until
+        # all clusters are on 7-C-3b+.
         if not self._local_model_id:
             return True
         if record.model_id != self._local_model_id:
@@ -283,9 +285,9 @@ class MembershipState:
     def _handle_join(self, msg: JoinMsg, now: float) -> list[OutgoingMessage]:
         rec = msg.self_record
         if not self._admit(rec):
-            # Rejected — don't install, don't echo back. Newcomer sees no
-            # response and either retries (with corrected model_id) or
-            # times out trying to join.
+            # Rejected — don't install, don't echo back. JoinMsg is fire-
+            # and-forget (no acks, no retransmit); the newcomer sees no
+            # response and times out. This is fail-closed by design.
             return []
         prev = self._members.get(rec.shard_id)
         installed = MemberRecord(
