@@ -82,6 +82,16 @@ def test_heterogeneous_mlx_head_pytorch_tail_tier1() -> None:
     if not _MANIFEST.exists():
         pytest.skip("reference manifest missing; run scripts/run_reference.py first")
 
+    # Pre-flight: skip cleanly if the bf16 MLX conversion is missing,
+    # rather than letting the head subprocess time out after 5 minutes.
+    from model_shard.mlx_engine import _resolve_local_for_mlx
+    resolved = _resolve_local_for_mlx("google/gemma-4-26B-A4B-it")
+    if resolved == "google/gemma-4-26B-A4B-it" or not Path(resolved).exists():
+        pytest.skip(
+            f"bf16 MLX conversion not at {resolved!r}; "
+            "run scripts/convert_mlx_bf16.py first"
+        )
+
     manifest = json.loads(_MANIFEST.read_text())
     record = manifest["prompts"][_PROMPT_IDX]
     prompt_tokens = list(record["prompt_tokens"])
@@ -89,6 +99,7 @@ def test_heterogeneous_mlx_head_pytorch_tail_tier1() -> None:
 
     port_head = _free_port()
     port_tail = _free_port()
+    assert port_head != port_tail, "free port allocator returned the same port twice"
     cfg_text = _SHARDS_YAML_TMPL.format(port_head=port_head, port_tail=port_tail)
 
     with tempfile.TemporaryDirectory() as tmpdir:
