@@ -296,10 +296,11 @@ All hardcoded model-id string literals were removed from code:
 `config/shards.yaml::model_id` is now the single source of truth and
 required at YAML-load time. `ShardMap.model_id` is exposed as a
 required field; `Node` default-backend construction reads it from the
-shard map and raises if absent. Sixteen call sites across one source
-file (`node.py`), four scripts (`run_node.py`, `run_client.py`,
-`run_reference.py`, `generate_tier1_comparison_fixture.py`), eleven
-test files, and the test conftest were swept.
+shard map and raises if absent. Hardcoded literals were removed from
+one source file (`node.py`), four entry-point scripts (`run_node.py`,
+`run_client.py`, `run_reference.py`,
+`generate_tier1_comparison_fixture.py`), and twelve test files
+including the conftest fixture.
 
 Multi-load bit-exactness tests (split equivalence, per-expert bit-exact,
 migration bit-exact) opt into a parallel `config/shards.tests.yaml`

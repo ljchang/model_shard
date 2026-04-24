@@ -52,9 +52,15 @@ class ShardMap:
     """Cluster-wide shard directory.
 
     ``model_id`` is the cluster-wide canonical model identifier — either an HF
-    repo id (e.g. ``"google/gemma-4-26B-A4B-it"``) or a local directory path
-    for MLX bf16 conversions.  Required: ``from_yaml`` raises ``ValueError`` if
-    the ``model_id`` field is absent or empty.
+    repo id (e.g. an HF model id) or a local directory path for MLX
+    conversions. Required at YAML-load time: ``from_yaml`` raises
+    ``ValueError`` if the ``model_id`` field is absent or empty.
+
+    The ``__init__`` default (``model_id=""``) is preserved for tests that
+    construct ``ShardMap`` programmatically and inject an explicit
+    ``backend`` into ``Node`` (bypassing the default-backend path that reads
+    ``shard_map.model_id``). Production loading always goes through
+    ``from_yaml`` and gets the non-empty enforcement for free.
     """
 
     def __init__(
