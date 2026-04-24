@@ -27,12 +27,17 @@ def _ids_mod3(r: int) -> list[int]:
 
 
 @pytest.mark.slow
-def test_three_sliced_shards_compose_bit_exact(loaded_model: Any, shards_model_id: str) -> None:
-    lm_full = loaded_model
+def test_three_sliced_shards_compose_bit_exact(
+    loaded_model_test: Any, shards_test_model_id: str,
+) -> None:
+    # Uses the smaller test model (config/shards.tests.yaml) — loading
+    # 4 instances of the production bf16 model in one process doesn't fit.
+    # The atomic-vs-split math is precision-independent.
+    lm_full = loaded_model_test
     lm_shards = [
-        load_model_partial(shards_model_id, {15: _ids_mod3(0)}),
-        load_model_partial(shards_model_id, {15: _ids_mod3(1)}),
-        load_model_partial(shards_model_id, {15: _ids_mod3(2)}),
+        load_model_partial(shards_test_model_id, {15: _ids_mod3(0)}),
+        load_model_partial(shards_test_model_id, {15: _ids_mod3(1)}),
+        load_model_partial(shards_test_model_id, {15: _ids_mod3(2)}),
     ]
     try:
         layer_idx = 15

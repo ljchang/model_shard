@@ -13,13 +13,18 @@ from model_shard.moe import run_selected_experts
 
 
 @pytest.mark.slow
-def test_run_selected_experts_sliced_lm_returns_correct_outputs(loaded_model: Any, shards_model_id: str) -> None:
+def test_run_selected_experts_sliced_lm_returns_correct_outputs(
+    loaded_model_test: Any, shards_test_model_id: str,
+) -> None:
     """Given the same input h, run_selected_experts on a sliced model for a
-    held id returns the same tensor as on the full model for that id."""
-    lm_full = loaded_model
+    held id returns the same tensor as on the full model for that id.
+
+    Uses the smaller test model (config/shards.tests.yaml) — slicing
+    bit-exactness is precision-independent."""
+    lm_full = loaded_model_test
     held_ids = [0, 3, 6, 9]
     lm_part = load_model_partial(
-        shards_model_id,
+        shards_test_model_id,
         {15: held_ids},
     )
     try:

@@ -12,11 +12,16 @@ from model_shard.moe import run_selected_experts
 
 
 @pytest.mark.slow
-def test_every_held_expert_matches_full_model(loaded_model: Any, shards_model_id: str) -> None:
-    lm_full = loaded_model
+def test_every_held_expert_matches_full_model(
+    loaded_model_test: Any, shards_test_model_id: str,
+) -> None:
+    # Uses the smaller test model (config/shards.tests.yaml) — loading
+    # both full + partial bf16 instances in one process is wasteful when
+    # the math under test (slicing bit-exactness) is precision-independent.
+    lm_full = loaded_model_test
     held_ids = [0, 3, 6, 9, 12, 15, 42, 127]
     lm_part = load_model_partial(
-        shards_model_id,
+        shards_test_model_id,
         {15: held_ids},
     )
     try:

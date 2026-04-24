@@ -22,6 +22,18 @@ from model_shard.shard_map import ShardMap
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_SHARDS_YAML = _REPO_ROOT / "config" / "shards.yaml"
+_TEST_SHARDS_YAML = _REPO_ROOT / "config" / "shards.tests.yaml"
+
+
+def _resolve_model_id(yaml_path: Path) -> str:
+    sm = ShardMap.from_yaml(yaml_path)
+    if not sm.model_id:
+        raise RuntimeError(
+            f"{yaml_path} has no model_id field; cannot resolve "
+            "test model. Add `model_id: <path-or-hf-id>` at the top "
+            "of the YAML."
+        )
+    return sm.model_id
 
 
 @pytest.fixture(scope="session")
@@ -32,14 +44,19 @@ def shards_model_id() -> str:
     derived ``loaded_model`` fixture) instead of hardcoding the model
     string. This makes the bf16 / 4-bit / future-quant choice a single
     config edit, not a many-file find-and-replace."""
-    sm = ShardMap.from_yaml(_DEFAULT_SHARDS_YAML)
-    if not sm.model_id:
-        raise RuntimeError(
-            f"{_DEFAULT_SHARDS_YAML} has no model_id field; cannot resolve "
-            "test model. Add `model_id: <path-or-hf-id>` at the top of "
-            "shards.yaml."
-        )
-    return sm.model_id
+    return _resolve_model_id(_DEFAULT_SHARDS_YAML)
+
+
+@pytest.fixture(scope="session")
+def shards_test_model_id() -> str:
+    """Smaller test model id from config/shards.tests.yaml — used by
+    multi-load bit-exactness tests that don't fit when running 3-4
+    bf16 model instances in one Python process on a 128 GB M5.
+
+    The math under test (atomic = sum of partials, slice/attach
+    bit-exact) is a property of the layer code, not the specific weight
+    precision, so the smaller 4-bit model preserves the test's intent."""
+    return _resolve_model_id(_TEST_SHARDS_YAML)
 
 
 @pytest.fixture(scope="session")
@@ -50,6 +67,18 @@ def loaded_model(shards_model_id: str) -> Any:
     from model_shard.mlx_engine import load_model
 
     return load_model(shards_model_id)
+
+
+@pytest.fixture(scope="session")
+def loaded_model_test(shards_test_model_id: str) -> Any:
+    """Loads the smaller test model once per session — companion to
+    ``shards_test_model_id`` for multi-load bit-exactness tests.
+
+    Lazy: only initialized when first requested. Tests using only
+    ``loaded_model`` (the bf16 production model) never trigger this load."""
+    from model_shard.mlx_engine import load_model
+
+    return load_model(shards_test_model_id)
 
 
 def _find_free_port() -> int:

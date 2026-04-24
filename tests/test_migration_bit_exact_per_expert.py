@@ -20,19 +20,26 @@ _LAYER = 15
 _MIGRATED_EXPERT = 3
 
 
-@pytest.fixture(scope="module")
-def lm_full(shards_model_id: str):
-    return load_model(shards_model_id)
+# Uses the smaller test model (config/shards.tests.yaml) — this module
+# loads 3 model instances (full + 2 partials) in one Python process,
+# which doesn't fit on bf16 in 128 GB. The migration bit-exactness math
+# is precision-independent (it's about slice/attach roundtrip equality
+# on stacked-tensor representations).
 
 
 @pytest.fixture(scope="module")
-def lm_a(shards_model_id: str):
-    return load_model_partial(shards_model_id, {_LAYER: [0, 3, 6, 9]})
+def lm_full(shards_test_model_id: str):
+    return load_model(shards_test_model_id)
 
 
 @pytest.fixture(scope="module")
-def lm_b(shards_model_id: str):
-    return load_model_partial(shards_model_id, {_LAYER: [1, 4, 7, 10]})
+def lm_a(shards_test_model_id: str):
+    return load_model_partial(shards_test_model_id, {_LAYER: [0, 3, 6, 9]})
+
+
+@pytest.fixture(scope="module")
+def lm_b(shards_test_model_id: str):
+    return load_model_partial(shards_test_model_id, {_LAYER: [1, 4, 7, 10]})
 
 
 def _synthetic_h(lm_full) -> mx.array:

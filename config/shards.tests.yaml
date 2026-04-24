@@ -1,0 +1,32 @@
+# Test-only shard map for memory-heavy multi-load tests.
+#
+# Production config (config/shards.yaml) uses bf16 (~48 GB) which doesn't
+# scale to the multi-load bit-exactness tests on a 128 GB M5 (those tests
+# load 3-4 model instances in one Python process to verify atomic = sum
+# of partials). The math being tested is a property of the layer code,
+# not of the specific weight precision, so running these tests against
+# the smaller 4-bit MLX model (~14 GB) preserves the test's intent at a
+# fraction of the runtime.
+#
+# Used by tests that opt into the `shards_test_model_id` and
+# `loaded_model_test` conftest fixtures. All other tests (Tier 1, Tier 2,
+# cross-backend, single-load partial tests) use config/shards.yaml.
+
+model_id: "mlx-community/gemma-4-26b-a4b-it-4bit"
+
+shards:
+  layer_0-10:
+    host: 127.0.0.1
+    port: 9001
+    start_layer: 0
+    end_layer: 10
+  layer_10-20:
+    host: 127.0.0.1
+    port: 9002
+    start_layer: 10
+    end_layer: 20
+  layer_20-30:
+    host: 127.0.0.1
+    port: 9003
+    start_layer: 20
+    end_layer: 30
