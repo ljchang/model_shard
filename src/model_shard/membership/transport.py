@@ -28,10 +28,17 @@ class UDPTransport:
         self._on_recv = on_recv
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._sock.bind((host, port))
+        # AF_INET requires an IPv4 address. With Tailscale (or any host
+        # that has both IPv4+IPv6 in DNS) bind/sendto can fail with
+        # EINVAL because the system resolver returns an IPv6 address
+        # first. Force IPv4 resolution via gethostbyname.
+        self._sock.bind((socket.gethostbyname(host), port))
         self._sock.settimeout(_RECV_TIMEOUT_S)
         self._stopping = threading.Event()
         self._thread: threading.Thread | None = None
+        # Cache: hostname -> IPv4 address. Hostnames don't change at
+        # runtime; avoid re-resolving on every gossip send.
+        self._ipv4_cache: dict[str, str] = {}
 
     def start(self) -> None:
         if self._thread is not None:
@@ -62,7 +69,12 @@ class UDPTransport:
             )
             return
         try:
-            self._sock.sendto(payload, address)
+            host = address[0]
+            ipv4 = self._ipv4_cache.get(host)
+            if ipv4 is None:
+                ipv4 = socket.gethostbyname(host)
+                self._ipv4_cache[host] = ipv4
+            self._sock.sendto(payload, (ipv4, address[1]))
         except OSError as exc:
             _LOG.warning("UDP sendto %s:%d failed: %s", address[0], address[1], exc)
 
