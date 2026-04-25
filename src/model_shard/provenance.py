@@ -10,7 +10,10 @@ import hashlib
 import time
 from collections.abc import Callable, Iterable
 
-import mlx.core as mx
+try:
+    import mlx.core as mx
+except ImportError:
+    mx = None  # type: ignore[assignment]
 
 from model_shard._pb import wire_pb2
 from model_shard.mlx_engine import tensor_to_bytes

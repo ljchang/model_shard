@@ -24,7 +24,10 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, BinaryIO, Protocol, cast
 
-import mlx.core as mx
+try:
+    import mlx.core as mx
+except ImportError:
+    mx = None  # type: ignore[assignment]
 
 from model_shard._pb import wire_pb2
 from model_shard.backends import Backend, PyTorchBackend

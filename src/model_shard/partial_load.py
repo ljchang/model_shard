@@ -15,7 +15,10 @@ from __future__ import annotations
 import logging
 import threading
 
-import mlx.core as mx
+try:
+    import mlx.core as mx
+except ImportError:
+    mx = None  # type: ignore[assignment]
 import numpy as np
 
 from model_shard.mlx_engine import LoadedModel

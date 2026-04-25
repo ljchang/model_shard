@@ -12,7 +12,10 @@ import random
 from collections.abc import Callable, Mapping
 from typing import Any
 
-import mlx.core as mx
+try:
+    import mlx.core as mx
+except ImportError:
+    mx = None  # type: ignore[assignment]
 
 
 def group_expert_ids_by_owner(

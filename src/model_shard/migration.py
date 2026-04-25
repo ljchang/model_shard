@@ -16,7 +16,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, BinaryIO, cast
 
-import mlx.core as mx
+try:
+    import mlx.core as mx
+except ImportError:
+    mx = None  # type: ignore[assignment]
 
 from model_shard._pb import wire_pb2
 from model_shard.envelope import recv_envelope, send_envelope

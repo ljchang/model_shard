@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import os as _os
 from dataclasses import dataclass, field
-from functools import partial
 from pathlib import Path as _Path
 from typing import Any
 
