@@ -179,6 +179,22 @@ class Node:
         self._in_flight_expert_requests: int = 0
         self._stopping = threading.Event()
 
+        # Phase 7-C-3b: state that _on_membership_change reads must be
+        # initialized BEFORE _membership.start() because the callback can
+        # fire as soon as the gossip thread sees a transition (which can
+        # happen during the model load below).
+        self._downstream: ShardSpec = _resolve_downstream(
+            shard, shard_map, total_layers,
+        )
+        self._state_lock = threading.Lock()
+        self._kv_caches: dict[str, list[Any]] = {}
+        self._head_states: dict[str, _HeadRequestState] = {}
+        self._pending_finalize: dict[str, ProvenanceEntry] = {}
+        self._out_lock = threading.Lock()
+        self._out_sock: socket.socket | None = None
+        self._out_stream: BinaryIO | None = None
+        self._orchestrator: ExpertOrchestrator | None = None  # filled post-load
+
         # Phase 7-C-3b: build AND start the membership runner BEFORE model
         # load. The model load can take many minutes (full bf16 26B), and
         # if UDP gossip isn't responsive during that window, peers mark this
@@ -240,17 +256,6 @@ class Node:
         self._total_layers = total_layers
         # Phase 6-B: provenance chain per forward pass.
         self._provenance_enabled = _provenance_enabled()
-        self._downstream: ShardSpec = _resolve_downstream(shard, shard_map, total_layers)
-
-        self._state_lock = threading.Lock()
-        self._kv_caches: dict[str, list[Any]] = {}
-        self._head_states: dict[str, _HeadRequestState] = {}
-        # Phase 6-B: finalize entry stashed per-request for Task 8 to attach to SampledToken.
-        self._pending_finalize: dict[str, ProvenanceEntry] = {}
-
-        self._out_lock = threading.Lock()
-        self._out_sock: socket.socket | None = None
-        self._out_stream: BinaryIO | None = None
 
         # Per-request debug captures: (next_layer_idx, hidden) recorded when
         # this node forwards an activation. In-process test hook only.
@@ -310,8 +315,9 @@ class Node:
         # ``ExpertRequest`` RPCs (see ``_handle_expert_request``); they do not
         # need an orchestrator because they never run the attention for the
         # split layer, only its experts on demand.
+        # (self._orchestrator was pre-initialized to None earlier so the
+        # _on_membership_change callback can read it during the load window.)
         self._split_layers: set[int] = set()
-        self._orchestrator: ExpertOrchestrator | None = None
         if _expert_shard_enabled() and self._shard.moe_experts:
             my_split = {
                 layer_idx
