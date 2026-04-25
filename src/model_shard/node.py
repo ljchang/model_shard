@@ -349,7 +349,11 @@ class Node:
             self._scanner.start()
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind((self._shard.address.host, self._shard.address.port))
+        # Bind to 0.0.0.0 (any IPv4 interface) for the same reason the UDP
+        # gossip transport does (transport.py): on Linux, /etc/hosts maps
+        # the local hostname to 127.0.1.1, so binding to that hostname
+        # would only listen on loopback. Tailscale peers couldn't reach us.
+        sock.bind(("0.0.0.0", self._shard.address.port))
         sock.listen(8)
         sock.settimeout(0.25)
         self._server_sock = sock
