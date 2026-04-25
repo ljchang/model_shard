@@ -790,6 +790,7 @@ class Node:
             self._head_states.pop(err.request_id, None)
 
     def _handle_end(self, req: wire_pb2.EndRequest) -> None:
+        _LOG.info("END req=%s shard=%s is_tail=%s", req.request_id, self._shard.shard_id, self.is_tail)
         with self._state_lock:
             self._kv_caches.pop(req.request_id, None)
             self._head_states.pop(req.request_id, None)
