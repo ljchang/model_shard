@@ -46,6 +46,7 @@ def bootstrap_sequential(
     peers: list[PeerSpec],
     request_fn: RequestFn,
     timeout_s: float = 0.5,
+    local_model_id: str = "",
 ) -> BootstrapResult:
     self_record = MemberRecord(
         shard_id=self_spec.shard_id,
@@ -53,7 +54,12 @@ def bootstrap_sequential(
         udp_port=self_spec.udp_port,
         state=MemberState.ALIVE,
         incarnation=0,
-        model_id="",
+        # Phase 7-C-3b: include our model_id in the JoinMsg so the seed's
+        # _admit() check passes on the very first message. Without this,
+        # the join is rejected and the joining node only becomes ALIVE
+        # later via SWIM Ping/Ack (which carries the correct model_id
+        # from MembershipState._build_records).
+        model_id=local_model_id,
         last_state_change=0.0,
         suspect_deadline=None,
     )

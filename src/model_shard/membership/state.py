@@ -91,7 +91,16 @@ class MembershipState:
                 udp_port=p.udp_port,
                 state=MemberState.ALIVE,
                 incarnation=0,
-                model_id=self._local_model_id if p.shard_id == self._self_id else "",
+                # All peers in a shards.yaml share the same model_id by
+                # definition — it's a cluster-wide invariant. Populating
+                # the initial view with our own local_model_id avoids
+                # gossip about peers carrying empty model_id and being
+                # rejected by _admit() before peers self-announce. When
+                # a peer's actual self-record arrives via gossip (with
+                # its own model_id), _maybe_apply_peer_delta still
+                # validates via _admit, so a misconfigured peer is
+                # caught the first time it actually speaks.
+                model_id=self._local_model_id,
                 last_state_change=0.0,
                 suspect_deadline=None,
             )
