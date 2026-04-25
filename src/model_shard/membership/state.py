@@ -86,12 +86,16 @@ class MembershipState:
             self._addrs[p.shard_id] = p
         self._members: dict[str, MemberRecord] = {}
         for p in [self_spec, *peer_specs]:
+            is_self = p.shard_id == self._self_id
             self._members[p.shard_id] = MemberRecord(
                 shard_id=p.shard_id,
                 host=p.host,
                 udp_port=p.udp_port,
                 state=MemberState.ALIVE,
-                incarnation=0,
+                # Self record carries the wall-clock-derived incarnation;
+                # peer records start at 0 (peers will gossip their actual
+                # self_incarnation via deltas in the first ping cycle).
+                incarnation=self._self_incarnation if is_self else 0,
                 # All peers in a shards.yaml share the same model_id by
                 # definition — it's a cluster-wide invariant. Populating
                 # the initial view with our own local_model_id avoids
@@ -116,6 +120,12 @@ class MembershipState:
         self._pending_helps: list[_PendingHelp] = []
         self._backlog: list[_BacklogEntry] = []
         self._backlog_seq: int = 0
+        # Seed the backlog with our own (wall-clock-incarnation) self-record
+        # so the very first gossip ping carries it. Peers that have us cached
+        # as DEAD/<lower-incarnation> from a prior run will accept this
+        # higher-incarnation ALIVE record via LWW.
+        if initial_incarnation > 0:
+            self._enqueue_backlog(self._members[self._self_id], 0.0)
 
     # ---------------------------------------------------------- read-only API
 
