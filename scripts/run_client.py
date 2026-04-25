@@ -9,12 +9,19 @@ Usage:
 
 This is a *client* — it knows how to reach the head node and stream tokens
 back. It has no pipeline logic. Nodes coordinate with each other directly.
+
+The --warmup flag pre-runs each prompt once with max_new_tokens=1, discarding
+outputs, before the timed pass. On CUDA backends with per-shape kernel JIT
+(e.g. HF transformers' _grouped_mm on Grace Blackwell + CUDA 13) this pays
+the prefill JIT cost up front so the timed pass measures steady-state
+behaviour rather than first-touch compile latency.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -38,6 +45,14 @@ def main() -> None:
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--model", default=None)
     parser.add_argument("--max-new-tokens", type=int, default=64)
+    parser.add_argument(
+        "--warmup",
+        action="store_true",
+        help=(
+            "Run each prompt once with max_new_tokens=1 before the timed pass, "
+            "discarding outputs. Use on CUDA hosts that JIT per prompt shape."
+        ),
+    )
     args = parser.parse_args()
 
     shard_map = ShardMap.from_yaml(args.config)
@@ -57,10 +72,26 @@ def main() -> None:
 
     client = Client(head_address=head_spec.address)
 
+    encoded_prompts = [
+        list(tokenizer.encode(text, add_special_tokens=False)) for text in prompts
+    ]
+
+    if args.warmup:
+        print(f"Warmup pass: {len(prompts)} prompts x 1 token each", flush=True)
+        for i, prompt_tokens in enumerate(encoded_prompts):
+            t0 = time.time()
+            client.generate(prompt_tokens, 1)
+            print(
+                f"[warmup {i + 1}/{len(prompts)}] len={len(prompt_tokens)} "
+                f"took {time.time() - t0:.1f}s",
+                flush=True,
+            )
+
     records: list[dict[str, object]] = []
-    for i, text in enumerate(prompts):
+    for i, (text, prompt_tokens) in enumerate(
+        zip(prompts, encoded_prompts, strict=True)
+    ):
         print(f"[{i + 1}/{len(prompts)}] {text!r}", flush=True)
-        prompt_tokens = list(tokenizer.encode(text, add_special_tokens=False))
         generated = client.generate(prompt_tokens, args.max_new_tokens)
         records.append(
             {
