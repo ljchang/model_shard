@@ -548,6 +548,14 @@ class Node:
 
             # Clean up everywhere.
             self._broadcast_end(request_id)
+            with self._state_lock:
+                self._head_states.pop(request_id, None)
+            # Close outbound after every request so the next request opens
+            # a fresh connection. Re-using the stream across requests was
+            # leaving subtle desync between head and mid — every prompt
+            # after the first hung at "waiting for SampledToken" because
+            # mid's read position drifted relative to head's write.
+            self._close_outbound()
         except OSError as exc:
             _LOG.warning("decode loop aborted by broken pipe: %s", exc)
             with contextlib.suppress(OSError):
