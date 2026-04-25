@@ -317,6 +317,69 @@ as redundant with faster bit-exact unit tests and skipped from the
 default slow run; they remain runnable manually. See
 `docs/superpowers/specs/2026-04-23-phase7c3a-bf16-rebaseline-design.md`.
 
+## Phase 7-C-3b status: Heterogeneous Cluster Smoke — partial
+
+Phase 7-C-3b's goal is a single inference cluster with shards running
+on different backends — MLX on Apple Silicon, PyTorch CUDA elsewhere
+— all serving the same source weights. Tasks 1-8 (cross-backend wire
+format, gossiped `model_id` admission contract, MLX HF-id resolver,
+2-subprocess heterogeneous pytest, deployment runbook) landed cleanly
+on Mac. Task 9 — the manual smoke verification on real Mac + DGX
+Spark + RTX 3090 hardware — is partially passing.
+
+**What works.** A 3-machine heterogeneous cluster boots (Mac MLX bf16
+head, Spark PyTorch CUDA bf16 mid, 3090 PyTorch CUDA bf16 tail). All
+three nodes converge to ALIVE in every other's gossip view. Tail's
+streaming partial-load (`pt_partial_load.load_model_partial`) reads
+expert tensors one at a time via `safetensors.safe_open` and skips
+layers outside the shard's range entirely, so the 3090 fits in
+~18 GB of its 24 GB VRAM (vs the prior implementation that materialized
+the full ~52 GB bf16 model on device before slicing). End-to-end
+inference works: a 5-token prompt yields 16 tokens through Mac MLX →
+Spark PyTorch CUDA → 3090 PyTorch CUDA in ~14-28 seconds; subsequent
+same-shape prompts yield 4 tokens in ~1 second.
+
+**What didn't.** The full runbook smoke (5 prompts of varying length
+× 16 tokens) does not complete in one run because the 11-token
+"In computer science, a Mixture-of-Experts model" prompt's prefill
+takes ~3 minutes on Spark's GB10. The 5-token prefill takes ~2s. This
+is a per-shape PyTorch kernel JIT cost in HF transformers'
+`integrations/moe.py:_grouped_mm` on the brand-new Grace Blackwell
+architecture (CUDA 13), not a cluster correctness bug; same-shape
+re-runs are fast.
+
+**Smoke output is degenerate (model behavior).** Greedy decoding on
+Gemma 4 26B-A4B-it without an instruction prefix loops back to copy
+prompt tokens — both the cluster and the bf16 oracle produce different
+degenerate loops on the same prompts. Bit-exact comparison against
+the oracle fails because of cross-backend bf16 numerical drift in the
+last-bit sense (Phase 7-C-2 already documented this with calibrated
+top-K agreement floors instead of exact match). The cluster is
+producing semantically valid model output; what differs is just which
+particular token gets argmaxed when the top two logits are nearly
+tied.
+
+**Sixteen real-deployment bugs fixed during Task 9.** Memory-management
+fixes (streaming partial-load, layer-range skip), cross-platform fixes
+(`mlx.core` import gates across 7 modules, `0.0.0.0` bind for
+TCP/UDP, IPv4-forced `gethostbyname` for Tailscale dual-stack),
+membership protocol fixes (wall-clock-seeded `self_incarnation` so
+restarted nodes beat cached DEAD records via LWW; incoming UDP
+implies-alive promotion; `_handle_end` propagation + outbound close
+at every shard so prompt N+1 doesn't desync on a stale stream),
+backend-detect fix (PyTorch+CUDA 12.8 install on the 3090 to bridge
+the driver-545 / torch-cu130 gap), and a startup-ordering refactor
+(membership runner builds and starts BEFORE the slow model load so
+peers stay responsive throughout).
+
+**Carried forward to Phase 7-C-4 / Task 10.** The slow-prefill on
+GB10 (likely fixable with `torch.compile(...)` warmup or by holding
+the kernel cache across requests of the same shape), the
+runbook-style "all 5 prompts in one run" smoke (achievable with
+prompt-set tuning or kernel pre-warming), and a memory writeup of
+the 16 deployment bugs as design lessons. See
+`docs/superpowers/plans/2026-04-24-phase7c3b-heterogeneous-cluster.md`.
+
 ## Phase 6-B status: Provenance Verification — complete
 
 Every forward pass now carries a hash-chained DAG of `ProvenanceEntry` records that
