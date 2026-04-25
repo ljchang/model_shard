@@ -797,6 +797,17 @@ class Node:
             # Intentionally do NOT drop _debug_captures here — tests read them
             # after the request completes. Production impact is a tiny memory
             # retention per request; cleared explicitly via clear_debug_captures().
+        # Phase 7-C-3b: propagate EndRequest down the chain so non-tail
+        # shards also clean up + close their outbound. Without this, mid's
+        # outbound to tail stays open with prompt-N's stream state, and
+        # prompt-N+1's activation forwarded over the same stream desyncs
+        # tail's reader (manifests as tail never receiving the activation
+        # even though TCP says ESTABLISHED).
+        if not self.is_tail:
+            with contextlib.suppress(OSError):
+                self._broadcast_end(req.request_id)
+        # Close outbound so the next request opens a fresh connection.
+        self._close_outbound()
 
     def _handle_expert_request(
         self,
