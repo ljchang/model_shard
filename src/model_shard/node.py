@@ -430,6 +430,10 @@ class Node:
         self, req: wire_pb2.BeginRequest, client_stream: BinaryIO
     ) -> None:
         """Only the head should receive BeginRequest (from a Client)."""
+        _LOG.info(
+            "BEGIN req=%s prompt_len=%d max=%d",
+            req.request_id, len(req.prompt_token_ids), int(req.max_new_tokens),
+        )
         if not self.is_head:
             _send_error(
                 client_stream,
@@ -612,6 +616,11 @@ class Node:
         tensor_bytes: bytes,
         inbound_stream: BinaryIO,
     ) -> None:
+        _LOG.info(
+            "ACT req=%s next_layer=%d shape=%s tensor_bytes=%d",
+            act.request_id, int(act.next_layer_idx),
+            list(act.tensor.shape), len(tensor_bytes),
+        )
         if int(act.next_layer_idx) != self._shard.start_layer:
             _LOG.error(
                 "activation for layer %d arrived at shard starting at %d",
@@ -740,10 +749,15 @@ class Node:
         if not self.is_head:
             _LOG.warning("unexpected SampledToken on non-head shard")
             return
+        _LOG.info("SAMPLED req=%s token=%d", tok.request_id, int(tok.token_id))
         with self._state_lock:
             state = self._head_states.get(tok.request_id)
+            known_ids = list(self._head_states.keys())
         if state is None:
-            _LOG.warning("SampledToken for unknown request_id %s", tok.request_id)
+            _LOG.warning(
+                "SampledToken for unknown request_id %s; known=%s",
+                tok.request_id, known_ids,
+            )
             return
         state.token_queue.put(int(tok.token_id))
 
