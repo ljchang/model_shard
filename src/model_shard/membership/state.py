@@ -449,6 +449,15 @@ class MembershipState:
     def _handle_ping(self, msg: PingMsg, now: float) -> list[OutgoingMessage]:
         if msg.from_shard_id not in self._members:
             return []
+        # Receiving a UDP message from a peer implies they're ALIVE — the
+        # canonical SWIM "self-evident liveness" signal. Promote the
+        # sender from any cached SUSPECT/DEAD state to ALIVE at their
+        # advertised incarnation. Without this, nodes that died and
+        # restarted stay stuck DEAD in peer views even though they're
+        # actively pinging.
+        self._maybe_promote_sender_alive(
+            msg.from_shard_id, msg.from_incarnation, now,
+        )
         self._apply_deltas(msg.deltas, now)
         return [
             OutgoingMessage(
@@ -460,6 +469,45 @@ class MembershipState:
                 ),
             )
         ]
+
+    def _maybe_promote_sender_alive(
+        self, sender_id: str, sender_incarnation: int, now: float,
+    ) -> None:
+        """If sender's record in our view is SUSPECT/DEAD, promote to
+        ALIVE at the sender's advertised incarnation. Same-incarnation
+        promotions (DEAD → ALIVE) are allowed because the inbound
+        message is direct evidence of liveness, overriding inferred
+        DEAD state from probe failures.
+        """
+        if sender_id == self._self_id:
+            return
+        prev = self._members.get(sender_id)
+        if prev is None:
+            return
+        if prev.state == MemberState.ALIVE:
+            return
+        # Direct liveness evidence: prefer max(prev.incarnation, sender's)
+        # so we never go backwards.
+        new_inc = max(prev.incarnation, sender_incarnation)
+        new_record = MemberRecord(
+            shard_id=prev.shard_id,
+            host=prev.host,
+            udp_port=prev.udp_port,
+            state=MemberState.ALIVE,
+            incarnation=new_inc,
+            model_id=prev.model_id,
+            last_state_change=now,
+            suspect_deadline=None,
+        )
+        self._members[sender_id] = new_record
+        self._transitions.append(
+            StateTransition(
+                shard_id=sender_id,
+                old_state=prev.state,
+                new_record=new_record,
+            )
+        )
+        self._enqueue_backlog(new_record, now)
 
     def _apply_deltas(self, deltas: list[MemberRecord], now: float) -> None:
         for d in deltas:
@@ -552,6 +600,13 @@ class MembershipState:
         probe = self._pending_probe
         if probe is not None and probe.target_id == msg.from_shard_id:
             self._pending_probe = None
+
+        # Same self-evident-liveness rule as _handle_ping: receiving an
+        # Ack from a peer means they're ALIVE, regardless of any prior
+        # cached SUSPECT/DEAD verdict.
+        self._maybe_promote_sender_alive(
+            msg.from_shard_id, msg.from_incarnation, now,
+        )
 
         # Apply piggybacked gossip deltas, just as we do on Ping.  This is
         # critical for dead-node rejoin: when a restarted node sends a Ping and
