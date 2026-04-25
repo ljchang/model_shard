@@ -38,7 +38,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, BinaryIO, cast
 
-import mlx.core as mx
+try:
+    import mlx.core as mx
+except ImportError:
+    mx = None  # type: ignore[assignment]
 
 from model_shard._pb import wire_pb2
 from model_shard.backends import Backend, MLXBackend
