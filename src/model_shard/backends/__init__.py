@@ -11,7 +11,6 @@ from model_shard.backends.base import (
     Mask,
     TopK,
 )
-from model_shard.backends.pytorch_backend import PyTorchBackend
 
 # MLX is Apple Silicon only. On Linux (e.g. DGX Spark) the mlx package isn't
 # installed — we still expose MLXBackend as a sentinel class so isinstance()
@@ -33,6 +32,29 @@ except ImportError:
                 "MLXBackend requires the mlx package, which is Apple Silicon "
                 "only. On non-darwin hosts, use MODEL_SHARD_BACKEND=pytorch "
                 "or construct PyTorchBackend directly."
+            )
+
+# torch is in the optional `pytorch` extras group, not a default dep. A Mac
+# user running `uv sync --extra dev` (no `--extra pytorch`) won't have torch
+# installed — same sentinel pattern as MLXBackend keeps `isinstance()` call
+# sites working.
+try:
+    from model_shard.backends.pytorch_backend import PyTorchBackend
+except ImportError:
+    class PyTorchBackend:  # type: ignore[no-redef]
+        """Sentinel class used when torch is unavailable.
+
+        Preserves ``isinstance(x, PyTorchBackend)`` call sites. Attempting
+        to instantiate raises ImportError with a pointer to the extras
+        group that installs torch.
+        """
+        name: str = "pytorch"
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            raise ImportError(
+                "PyTorchBackend requires the torch package. Install with "
+                "`uv sync --extra pytorch`, or use MODEL_SHARD_BACKEND=mlx "
+                "on Apple Silicon."
             )
 
 __all__ = [
