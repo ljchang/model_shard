@@ -87,24 +87,105 @@ def load_model_partial(
     device: str | None = None,
     dtype: torch.dtype = torch.bfloat16,
 ) -> Any:
-    """Load the full model, then zero out experts not in held_experts_per_layer.
+    """Load only the held experts via streaming safetensors.
 
-    MVP behavior: full load, then defensive zero — same memory footprint
-    at steady state as held-only would give, just slower to warm up. A
-    sparse-load refinement (skip reading non-held expert weights from disk)
-    is a Phase 7-C optimization.
+    Reads tensors one-at-a-time from disk via ``safetensors.safe_open``,
+    slices each expert tensor at read time to ``[len(held), ...]``, then
+    materializes the result on ``device``. Peak memory ≈ one expert
+    tensor (~1 GB) staging + the growing target model.
+
+    Replaces the prior MVP behavior (full load on device, then defensive
+    zero) which OOM'd on 24 GB GPUs because peak VRAM = full ~52 GB
+    regardless of how few experts the shard kept.
     """
-    from model_shard import pytorch_engine
-    model = pytorch_engine.load_model(hf_id, device=device, dtype=dtype)
-    lock = threading.Lock()
-    text_layers = model.model.layers
-    for layer_idx, layer in enumerate(text_layers):
-        experts = getattr(layer, "experts", None)
-        if experts is None:
-            continue
-        num_experts = int(experts.num_experts)
-        held = set(held_experts_per_layer.get(layer_idx, []))
-        for k in range(num_experts):
-            if k not in held:
-                detach_expert(model, layer_idx, k, lock)
+    import json
+    import re
+    from pathlib import Path
+
+    from accelerate import init_empty_weights  # type: ignore[import-untyped]
+    from huggingface_hub import snapshot_download
+    from safetensors import safe_open
+    from transformers import AutoConfig, AutoModelForCausalLM
+
+    from model_shard.pytorch_engine import _default_device
+
+    device = device or _default_device()
+    if device == "mps" and dtype == torch.bfloat16:
+        dtype = torch.float16
+
+    snapshot_path = Path(snapshot_download(hf_id))
+    config = AutoConfig.from_pretrained(hf_id)
+    with (snapshot_path / "model.safetensors.index.json").open() as fh:
+        index = json.load(fh)
+    weight_map: dict[str, str] = index["weight_map"]
+
+    with init_empty_weights():
+        model = AutoModelForCausalLM.from_config(  # type: ignore[no-untyped-call]
+            config, torch_dtype=dtype,
+        )
+
+    handles = {
+        f: safe_open(  # type: ignore[no-untyped-call]
+            snapshot_path / f, framework="pt", device="cpu",
+        )
+        for f in sorted(set(weight_map.values()))
+    }
+
+    expert_re = re.compile(
+        r"^model\.language_model\.layers\.(\d+)\.experts\.(gate_up_proj|down_proj)$"
+    )
+
+    for tensor_name, shard_file in weight_map.items():
+        full_tensor = handles[shard_file].get_tensor(  # type: ignore[no-untyped-call]
+            tensor_name,
+        )
+        m = expert_re.match(tensor_name)
+        if m is not None:
+            layer_idx = int(m.group(1))
+            held = held_experts_per_layer.get(layer_idx)
+            if held is not None:
+                # Slice [128, ...] -> [len(held), ...] before materializing on device.
+                full_tensor = full_tensor[held]
+        device_tensor = full_tensor.to(device=device, dtype=dtype)
+        del full_tensor
+        _set_module_attr(model, tensor_name, device_tensor)
+
+    # lm_head ↔ embed_tokens are tied — re-link after meta replacement.
+    model.tie_weights()
+    model.eval()
     return model
+
+
+def _set_module_attr(model: Any, dotted_name: str, tensor: torch.Tensor) -> None:
+    """Replace ``model.<dotted_name>`` with the loaded tensor.
+
+    Walks the dotted path, then either reassigns an ``nn.Parameter`` (for
+    parameter slots — the common case) or re-registers a buffer (for
+    non-parameter tensors). Handles shape mismatch transparently because
+    the slot is fully replaced rather than data-copied.
+    """
+    parts = dotted_name.split(".")
+    obj: Any = model
+    for p in parts[:-1]:
+        obj = getattr(obj, p)
+    leaf = parts[-1]
+    current = getattr(obj, leaf, None)
+    if isinstance(current, torch.nn.Parameter):
+        new_param = torch.nn.Parameter(tensor, requires_grad=False)
+        # Bypass setattr's nn.Module logic that would re-register; assign
+        # directly to _parameters dict to avoid validation against the
+        # previous (meta) parameter's shape.
+        if isinstance(obj, torch.nn.Module):
+            obj._parameters[leaf] = new_param
+        else:
+            setattr(obj, leaf, new_param)
+    elif isinstance(current, torch.Tensor):
+        # Buffer slot — re-register with the new tensor.
+        if isinstance(obj, torch.nn.Module) and leaf in obj._buffers:
+            obj._buffers[leaf] = tensor
+        else:
+            setattr(obj, leaf, tensor)
+    else:
+        raise ValueError(
+            f"unexpected attribute type at {dotted_name}: {type(current).__name__}"
+        )
