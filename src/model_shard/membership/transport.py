@@ -28,11 +28,14 @@ class UDPTransport:
         self._on_recv = on_recv
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        # AF_INET requires an IPv4 address. With Tailscale (or any host
-        # that has both IPv4+IPv6 in DNS) bind/sendto can fail with
-        # EINVAL because the system resolver returns an IPv6 address
-        # first. Force IPv4 resolution via gethostbyname.
-        self._sock.bind((socket.gethostbyname(host), port))
+        # Bind to 0.0.0.0 (all IPv4 interfaces) rather than the resolved
+        # hostname IP. Linux distros usually have a 127.0.1.1 <hostname>
+        # entry in /etc/hosts for sudo/sshd, so gethostbyname(self_host)
+        # returns loopback — which then can't sendto routable IPs like
+        # Tailscale's 100.64.0.0/10 (kernel returns EINVAL on cross-
+        # interface source/dest). The destination address is still
+        # explicitly resolved to IPv4 in send_to so AF_INET sendto works.
+        self._sock.bind(("0.0.0.0", port))
         self._sock.settimeout(_RECV_TIMEOUT_S)
         self._stopping = threading.Event()
         self._thread: threading.Thread | None = None
