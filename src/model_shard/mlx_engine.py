@@ -77,9 +77,12 @@ class LoadedModel:
     held_ids_per_layer: dict[int, tuple[int, ...]] = field(default_factory=dict)
 
 
-@partial(mx.compile, shapeless=True)
 def _softcap(softcap: float, x: mx.array) -> mx.array:
     return mx.tanh(x / softcap) * softcap
+
+
+if mx is not None:
+    _softcap = mx.compile(_softcap, shapeless=True)
 
 
 def load_model(hf_id: str) -> LoadedModel:
