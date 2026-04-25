@@ -141,11 +141,14 @@ def load_model_partial(
     else:
         shard_layers = set()
 
-    expert_re = re.compile(
-        r"^model\.language_model\.layers\.(\d+)\.experts\.(gate_up_proj|down_proj)$"
-    )
     layer_re = re.compile(r"^model\.language_model\.layers\.(\d+)\.")
 
+    # Keep expert tensors at full [num_experts, ...] shape. HF's MoE forward
+    # (transformers/integrations/moe.py:_grouped_mm) indexes the weight by
+    # the router's output expert IDs — sliced [k, ...] shapes produce
+    # "matrix batch sizes have to match" RuntimeErrors. The held_experts_per_
+    # layer mapping is now informational metadata for the orchestrator's
+    # global->local dispatch; weights stay full-shape.
     skipped = 0
     for tensor_name, shard_file in weight_map.items():
         if shard_layers:
@@ -156,13 +159,6 @@ def load_model_partial(
         full_tensor = handles[shard_file].get_tensor(  # type: ignore[no-untyped-call]
             tensor_name,
         )
-        m = expert_re.match(tensor_name)
-        if m is not None:
-            layer_idx = int(m.group(1))
-            held = held_experts_per_layer.get(layer_idx)
-            if held is not None:
-                # Slice [128, ...] -> [len(held), ...] before materializing on device.
-                full_tensor = full_tensor[held]
         device_tensor = full_tensor.to(device=device, dtype=dtype)
         del full_tensor
         _set_module_attr(model, tensor_name, device_tensor)
