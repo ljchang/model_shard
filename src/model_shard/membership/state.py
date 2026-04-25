@@ -74,9 +74,10 @@ class MembershipState:
         rng: random.Random,
         config: SwimConfig,
         local_model_id: str = "",
+        initial_incarnation: int = 0,
     ) -> None:
         self._self_id = self_spec.shard_id
-        self._self_incarnation = 0
+        self._self_incarnation = initial_incarnation
         self._cfg = config
         self._rng = rng
         self._local_model_id = local_model_id  # Phase 7-C-3b

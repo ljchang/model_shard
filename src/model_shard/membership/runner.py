@@ -68,12 +68,18 @@ class MembershipRunner:
         self._self_spec = self_spec
         self._peers = peers
         self._rng = random.Random(rng_seed)
+        # Seed self_incarnation from the wall clock so a restarted node
+        # always announces a higher incarnation than peers' cached records
+        # from prior runs. Otherwise an incarnation=0 ALIVE announcement
+        # loses LWW to a DEAD record from the previous run.
+        import time as _time
         self._state = MembershipState(
             self_spec=self_spec,
             peer_specs=peers,
             rng=self._rng,
             config=config,
             local_model_id=local_model_id,
+            initial_incarnation=int(_time.time()),
         )
         self._addr_by_id: dict[str, tuple[str, int]] = {
             self_spec.shard_id: (self_spec.host, self_spec.udp_port)
