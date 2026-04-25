@@ -114,7 +114,7 @@ def main() -> None:
         shard_map.lookup(sid).end_layer for sid in shard_map.all_shards()
     )
 
-    lm: LoadedModel
+    lm: LoadedModel | None
     if os.environ.get("SHARD_DRY_RUN") == "true":
         from unittest.mock import MagicMock
 
@@ -130,25 +130,20 @@ def main() -> None:
             shard.address.port,
         )
     else:
-        from model_shard.mlx_engine import load_model
-
-        log.info("loading model %s", model_id)
-        lm = load_model(model_id)
+        # Phase 7-B+: Node.__init__ default-backend path handles model
+        # loading via the platform-appropriate Backend (MLX on Apple
+        # Silicon, PyTorch on CUDA). Don't pre-load via mlx_engine here
+        # — that path is Apple-only and breaks Linux nodes.
+        lm = None
         log.info(
-            "loaded: %d layers; serving shard %s layers [%d, %d) on %s:%d",
-            lm.num_layers,
+            "loading model %s via default backend; serving shard %s layers [%d, %d) on %s:%d",
+            model_id,
             shard.shard_id,
             shard.start_layer,
             shard.end_layer,
             shard.address.host,
             shard.address.port,
         )
-        if lm.num_layers != total_layers:
-            log.warning(
-                "model has %d layers but config expects %d — using model value",
-                lm.num_layers,
-                total_layers,
-            )
 
     node = Node(
         shard=shard,
