@@ -170,6 +170,45 @@ class Node:
         # Phase 5b: per-node heat tracker for routing-count EMA.
         self._heat_tracker = HeatTracker()
 
+        # Phase 4 load tracking. Constructed early so the membership runner
+        # below (which we want responsive BEFORE the slow model load) can
+        # register a load-source callback that closes over self._load_tracker.
+        self._load_tracker = LoadTracker(
+            alpha=0.3, jitter_pct=0.1, rng=_random_mod.Random()
+        )
+        self._in_flight_expert_requests: int = 0
+        self._stopping = threading.Event()
+
+        # Phase 7-C-3b: build AND start the membership runner BEFORE model
+        # load. The model load can take many minutes (full bf16 26B), and
+        # if UDP gossip isn't responsive during that window, peers mark this
+        # node DEAD via probe failures — and SWIM's last-writer-wins won't
+        # let them re-admit it once the load completes (DEAD/incarnation=0
+        # ≥ ALIVE/incarnation=0 by IntEnum severity ordering). Starting the
+        # runner here keeps the UDP transport binding + recv loop responsive
+        # throughout the model load.
+        self._membership: MembershipRunner | None = None
+        if _gossip_enabled():
+            self._membership = self._build_membership_runner()
+
+            def _load_source() -> LoadReportRecord:
+                return LoadReportRecord(
+                    shard_id=self._shard.shard_id,
+                    queue_depth_ema=self._load_tracker.report(),
+                    ts_unix_ms=int(time.time() * 1000),
+                )
+            self._membership.start_load_source(_load_source)
+
+            def _self_heat_report() -> HeatReportRecord:
+                return HeatReportRecord(
+                    shard_id=self._shard.shard_id,
+                    entries=tuple(self._heat_tracker.report()),
+                    ts_unix_ms=int(time.time() * 1000),
+                )
+            self._membership.start_heat_source(_self_heat_report)
+            self._membership.subscribe(self._on_membership_change)
+            self._membership.start()
+
         # Phase 7-A / 7-B: Backend construction.
         # Precedence:
         #   1. Explicit `backend` kwarg wins.
@@ -217,38 +256,7 @@ class Node:
         # this node forwards an activation. In-process test hook only.
         self._debug_captures: dict[str, list[tuple[int, mx.array]]] = {}
 
-        self._stopping = threading.Event()
         self._server_sock: socket.socket | None = None
-
-        self._membership: MembershipRunner | None = None
-        if _gossip_enabled():
-            self._membership = self._build_membership_runner()
-
-        # Phase 4 load tracking. The tracker is always constructed (even when
-        # gossip is disabled) so ``_handle_expert_request`` has somewhere to
-        # post queue-depth samples. The runner-side ``start_load_source``
-        # registration is only useful when gossip is active.
-        self._load_tracker = LoadTracker(
-            alpha=0.3, jitter_pct=0.1, rng=_random_mod.Random()
-        )
-        self._in_flight_expert_requests: int = 0
-
-        if self._membership is not None:
-            def _load_source() -> LoadReportRecord:
-                return LoadReportRecord(
-                    shard_id=self._shard.shard_id,
-                    queue_depth_ema=self._load_tracker.report(),
-                    ts_unix_ms=int(time.time() * 1000),
-                )
-            self._membership.start_load_source(_load_source)
-
-            def _self_heat_report() -> HeatReportRecord:
-                return HeatReportRecord(
-                    shard_id=self._shard.shard_id,
-                    entries=tuple(self._heat_tracker.report()),
-                    ts_unix_ms=int(time.time() * 1000),
-                )
-            self._membership.start_heat_source(_self_heat_report)
 
         # Phase 5b: migration scanner (opt-in via ENABLE_DYNAMIC_MIGRATION).
         self._scanner: MigrationScanner | None = None
@@ -327,9 +335,10 @@ class Node:
     # ---------------------------------------------------------------- server
 
     def serve_forever(self) -> None:
-        if self._membership is not None:
-            self._membership.subscribe(self._on_membership_change)
-            self._membership.start()
+        # Phase 7-C-3b: membership is now built + started in __init__ so
+        # the UDP transport is responsive during the model load. Keep
+        # only the migration scanner startup here — it depends on a
+        # loaded model.
         if self._scanner is not None:
             self._scanner.start()
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
