@@ -13,13 +13,18 @@ Gemma 4 26B A4B specifics baked in:
   * final_logit_softcapping = 30.0.
 """
 
+from __future__ import annotations
+
 import os as _os
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path as _Path
 from typing import Any
 
-import mlx.core as mx
+try:
+    import mlx.core as mx
+except ImportError:
+    mx = None  # type: ignore[assignment]
 import numpy as np
 
 from model_shard._pb import wire_pb2
@@ -221,15 +226,21 @@ def finalize(lm: LoadedModel, h: mx.array) -> mx.array:
 
 
 # dtype enum (proto) → (mx dtype, numpy staging dtype, bytes-per-element)
-_DTYPE_MAP: dict[int, tuple[mx.Dtype, np.dtype, int]] = {
-    wire_pb2.DTYPE_FLOAT32: (mx.float32, np.dtype("float32"), 4),
-    wire_pb2.DTYPE_FLOAT16: (mx.float16, np.dtype("float16"), 2),
-    wire_pb2.DTYPE_BFLOAT16: (mx.bfloat16, np.dtype("uint16"), 2),  # staged as uint16
-    wire_pb2.DTYPE_INT32: (mx.int32, np.dtype("int32"), 4),
-    wire_pb2.DTYPE_INT8: (mx.int8, np.dtype("int8"), 1),
-    wire_pb2.DTYPE_UINT8: (mx.uint8, np.dtype("uint8"), 1),
-    wire_pb2.DTYPE_UINT32: (mx.uint32, np.dtype("uint32"), 4),  # NEW
-}
+# On non-MLX platforms (Linux PyTorch nodes), mx is None and this map is
+# empty; nothing in this module is callable without mx anyway.
+_DTYPE_MAP: dict[int, tuple[Any, np.dtype, int]] = (
+    {
+        wire_pb2.DTYPE_FLOAT32: (mx.float32, np.dtype("float32"), 4),
+        wire_pb2.DTYPE_FLOAT16: (mx.float16, np.dtype("float16"), 2),
+        wire_pb2.DTYPE_BFLOAT16: (mx.bfloat16, np.dtype("uint16"), 2),
+        wire_pb2.DTYPE_INT32: (mx.int32, np.dtype("int32"), 4),
+        wire_pb2.DTYPE_INT8: (mx.int8, np.dtype("int8"), 1),
+        wire_pb2.DTYPE_UINT8: (mx.uint8, np.dtype("uint8"), 1),
+        wire_pb2.DTYPE_UINT32: (mx.uint32, np.dtype("uint32"), 4),
+    }
+    if mx is not None
+    else {}
+)
 
 
 def _mx_to_wire_dtype(dtype: mx.Dtype) -> int:
