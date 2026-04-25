@@ -131,11 +131,28 @@ def load_model_partial(
         for f in sorted(set(weight_map.values()))
     }
 
+    # Any tensor under model.language_model.layers.X.* where X is OUTSIDE
+    # this range is skipped — left as a meta tensor that the runtime never
+    # touches because the shard's pipeline only invokes its own layer slice.
+    # Without this, layers outside the shard's range would still load full
+    # [128, ...] expert tensors and OOM a 24 GB GPU.
+    if held_experts_per_layer:
+        shard_layers: set[int] = set(held_experts_per_layer.keys())
+    else:
+        shard_layers = set()
+
     expert_re = re.compile(
         r"^model\.language_model\.layers\.(\d+)\.experts\.(gate_up_proj|down_proj)$"
     )
+    layer_re = re.compile(r"^model\.language_model\.layers\.(\d+)\.")
 
+    skipped = 0
     for tensor_name, shard_file in weight_map.items():
+        if shard_layers:
+            lm = layer_re.match(tensor_name)
+            if lm is not None and int(lm.group(1)) not in shard_layers:
+                skipped += 1
+                continue
         full_tensor = handles[shard_file].get_tensor(  # type: ignore[no-untyped-call]
             tensor_name,
         )
