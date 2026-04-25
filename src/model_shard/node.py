@@ -560,6 +560,13 @@ class Node:
             with self._state_lock:
                 self._kv_caches.pop(request_id, None)
                 self._head_states.pop(request_id, None)
+            # Close the outbound TCP to downstream so the next request
+            # starts with a fresh connection. Without this, a partial
+            # activation may sit in the TCP buffer at the peer and the
+            # next request's framing gets out of sync, hanging the peer.
+            self._close_outbound()
+            with contextlib.suppress(OSError):
+                self._broadcast_end(request_id)
         except ExpertRpcFailure as exc:
             _LOG.warning("decode loop aborted by expert RPC failure: %s", exc)
             with contextlib.suppress(OSError):
@@ -572,6 +579,9 @@ class Node:
             with self._state_lock:
                 self._kv_caches.pop(request_id, None)
                 self._head_states.pop(request_id, None)
+            self._close_outbound()
+            with contextlib.suppress(OSError):
+                self._broadcast_end(request_id)
         except PeerLeftAliveError as exc:
             _LOG.warning("decode loop aborted by peer-left-alive: %s", exc)
             with contextlib.suppress(OSError):
@@ -584,6 +594,9 @@ class Node:
             with self._state_lock:
                 self._kv_caches.pop(request_id, None)
                 self._head_states.pop(request_id, None)
+            self._close_outbound()
+            with contextlib.suppress(OSError):
+                self._broadcast_end(request_id)
 
     def _handle_activation(
         self,
