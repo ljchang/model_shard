@@ -340,13 +340,23 @@ Spark PyTorch CUDA → 3090 PyTorch CUDA in ~14-28 seconds; subsequent
 same-shape prompts yield 4 tokens in ~1 second.
 
 **What didn't.** The full runbook smoke (5 prompts of varying length
-× 16 tokens) does not complete in one run because the 11-token
-"In computer science, a Mixture-of-Experts model" prompt's prefill
-takes ~3 minutes on Spark's GB10. The 5-token prefill takes ~2s. This
-is a per-shape PyTorch kernel JIT cost in HF transformers'
-`integrations/moe.py:_grouped_mm` on the brand-new Grace Blackwell
-architecture (CUDA 13), not a cluster correctness bug; same-shape
-re-runs are fast.
+× 16 tokens) does not complete because of a `torch.nn.functional.grouped_mm`
+pathology on Grace Blackwell + CUDA 13. The 11-token
+"In computer science, a Mixture-of-Experts model" prompt's first
+forward through Spark's mid shard takes **~55 minutes** to resolve
+the cuBLAS-LT path-selection heuristic for input shape `(1, 11, 2816)`
+× weight `(num_experts, ..., ...)` in bf16. The 5-token shape resolves
+in seconds. Investigation in 2026-04-26 confirmed: it is not
+`torch.compile`, not Triton, not Inductor — bare cuBLAS-LT path
+selection for one specific MoE shape. The CUDA driver cubin cache
+(`~/.nv/ComputeCache`) does not preserve resolved kernels usefully
+across requests in this configuration; second 11-token request also
+takes ~55 minutes. While compute is in flight the GIL is held
+continuously, which starves SWIM gossip and causes peers to flap
+mid SUSPECT/ALIVE — a downstream symptom, not the root cause. This
+is a PyTorch + Grace Blackwell + CUDA 13 issue, not a model_shard
+correctness bug; the cluster's wire protocol, gossip, admission, and
+EndRequest propagation all behave correctly throughout.
 
 **Smoke output is degenerate (model behavior).** Greedy decoding on
 Gemma 4 26B-A4B-it without an instruction prefix loops back to copy
@@ -372,12 +382,27 @@ the driver-545 / torch-cu130 gap), and a startup-ordering refactor
 (membership runner builds and starts BEFORE the slow model load so
 peers stay responsive throughout).
 
-**Carried forward to Phase 7-C-4 / Task 10.** The slow-prefill on
-GB10 (likely fixable with `torch.compile(...)` warmup or by holding
-the kernel cache across requests of the same shape), the
-runbook-style "all 5 prompts in one run" smoke (achievable with
-prompt-set tuning or kernel pre-warming), and a memory writeup of
-the 16 deployment bugs as design lessons. See
+**Why phase stays PARTIAL.** The path to a clean 5-prompt smoke runs
+through the PyTorch primitive that's broken on this hardware
+combination, not through model_shard. Real fixes are out of scope:
+file a PyTorch issue with a minimal `grouped_mm` repro on GB10 +
+CUDA 13.0 + bf16, downgrade to CUDA 12.x where this primitive is
+mature, or wait for upstream fixes. Within model_shard scope, two
+bandaids exist if needed: pre-warm all expected `(1, N, 2816)` shapes
+at process startup (paying ~55 min × distinct prompt-lengths once,
+hoping the cubin cache survives — it didn't in our testing), or
+work-around by routing through `_grouped_mm_fallback` (the for-loop
+reference impl, no JIT but slower per call). Neither is the right
+abstraction for a "CDN for experts on heterogeneous hardware" thesis,
+so neither lands here.
+
+**Landed during Task 10 prep.** A `--warmup` flag on
+`scripts/run_client.py` that pre-runs each prompt with
+`max_new_tokens=1` before timed pass — useful as a structural feature
+even though it doesn't help with this specific JIT (the warmup itself
+hits the same wall). A `PyTorchBackend` import sentinel mirroring the
+`MLXBackend` pattern so a Mac `uv sync --extra dev` (no `--extra
+pytorch`) can import `model_shard.backends` without errors. See
 `docs/superpowers/plans/2026-04-24-phase7c3b-heterogeneous-cluster.md`.
 
 ## Phase 6-B status: Provenance Verification — complete

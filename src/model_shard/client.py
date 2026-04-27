@@ -37,14 +37,6 @@ class Client:
         conn = socket.create_connection(
             (self._head.host, self._head.port), timeout=30.0
         )
-        # Read timeout has to absorb cold-start prefill JIT at any shard in
-        # the pipeline (HF transformers' _grouped_mm on Grace Blackwell +
-        # CUDA 13 compiles a fresh kernel per (batch, seq_len) shape, which
-        # can take many minutes per shape on first hit and persists across
-        # process restarts only when the kernel cache directory survives).
-        # Steady-state requests return in seconds; SWIM gossip is the
-        # dead-peer detector, not the socket read timeout.
-        conn.settimeout(1800.0)
         with closing(conn), cast(BinaryIO, conn.makefile("rwb", buffering=0)) as stream:
             begin = wire_pb2.Envelope()
             begin.begin.protocol_version = _PROTOCOL_VERSION

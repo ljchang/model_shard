@@ -1121,9 +1121,6 @@ class Node:
                 (self._downstream.address.host, self._downstream.address.port),
                 timeout=30.0,
             )
-            # Read timeout absorbs cold-start prefill JIT at any downstream
-            # shard. See client.py for the full rationale.
-            sock.settimeout(1800.0)
             self._out_sock = sock
             self._out_stream = cast(BinaryIO, sock.makefile("rwb", buffering=0))
         return self._out_stream
