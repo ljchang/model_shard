@@ -37,6 +37,13 @@ class Client:
         conn = socket.create_connection(
             (self._head.host, self._head.port), timeout=30.0
         )
+        # Read timeout has to absorb cold-start prefill JIT at any shard in
+        # the pipeline (HF transformers' _grouped_mm on Grace Blackwell +
+        # CUDA 13 compiles a fresh kernel per (batch, seq_len) shape, which
+        # can be ~3 min on first hit). Steady-state requests return in
+        # seconds; SWIM gossip is the dead-peer detector, not the socket
+        # read timeout. 300s is a generous backstop, not a perf target.
+        conn.settimeout(300.0)
         with closing(conn), cast(BinaryIO, conn.makefile("rwb", buffering=0)) as stream:
             begin = wire_pb2.Envelope()
             begin.begin.protocol_version = _PROTOCOL_VERSION
