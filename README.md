@@ -112,7 +112,7 @@ A node can now evict migration-added experts under capacity pressure via
 
 `detach_expert` is the inverse of Phase 5b's `attach_expert`: it shrinks
 the compact stacked tensor via a complementary-index `mx.take` under
-`_MLX_COMPUTE_LOCK`, so tensor mutation is serialized with any in-flight
+`_COMPUTE_LOCK`, so tensor mutation is serialized with any in-flight
 `ExpertRequest`. `MigrationScanner._maybe_evict_one` runs after the pull
 pass under the same single-in-flight lock, fires only at capacity, and
 selects the coldest-heat migration-added expert as the eviction victim.

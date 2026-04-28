@@ -1,12 +1,8 @@
 """Phase 7-C-4 cleanup regression tests.
 
-These tests verify the cleanup invariants that the rest of the suite
-doesn't already cover:
-  - _MLX_COMPUTE_LOCK alias is gone (only _COMPUTE_LOCK remains)
-  - lm parameter is gone from ExpertOrchestrator.run_split_layer and
-    _phase_b_with_retry signatures
-  - Backend protocol has apply_outer_decoder_ops
-  - Backend.aggregate_experts accepts the batched [B, S, K] signature
+Verifies cleanup invariants that the rest of the suite doesn't cover.
+Subsequent tasks in this phase will add tests to this file as the
+corresponding cleanups land.
 """
 
 from __future__ import annotations

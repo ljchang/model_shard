@@ -1,4 +1,4 @@
-"""Phase 7-B Task 1: pyproject.toml pytorch optional-deps + cuda marker + _COMPUTE_LOCK alias."""
+"""Phase 7-B Task 1: pyproject.toml pytorch optional-deps + cuda marker + _COMPUTE_LOCK existence."""
 from __future__ import annotations
 
 import tomllib

@@ -1,6 +1,6 @@
 """Phase 6-C slow: eviction correctness under ExpertRequest.
 
-Lock invariant: _MLX_COMPUTE_LOCK serializes detach_expert with compute.
+Lock invariant: _COMPUTE_LOCK serializes detach_expert with compute.
 After eviction completes, subsequent ExpertRequest arriving sees the
 post-eviction _live_experts and correctly returns ERR_WRONG_SHARD (via
 Task 5's authority shift)."""
