@@ -139,6 +139,27 @@ class PyTorchBackend:
             top_k_weights, shared_out,
         )
 
+    def apply_outer_decoder_ops(
+        self,
+        layer_idx: int,
+        block_in: Any,  # torch.Tensor
+        residual: Any,  # torch.Tensor
+    ) -> Any:
+        """Apply the outer post-MoE ops on the PyTorch path. See the
+        MLXBackend docstring for what these ops are.
+
+        Uses pytorch_engine._text_model to unwrap Gemma4Model ->
+        language_model when the loaded model is the multimodal wrapper."""
+        from model_shard.pytorch_engine import _text_model
+        assert self._model is not None
+        layer = _text_model(self._model).layers[layer_idx]
+        with torch.no_grad():
+            out = layer.post_feedforward_layernorm(block_in)
+            out = residual + out
+            if layer.layer_scalar is not None:
+                out = out * layer.layer_scalar
+        return out
+
     def finalize(self, h: torch.Tensor) -> torch.Tensor:
         assert self._model is not None
         return pytorch_engine.finalize(self._model, h)

@@ -123,6 +123,29 @@ class MLXBackend:
             layer.post_feedforward_layernorm_2,
         )
 
+    def apply_outer_decoder_ops(
+        self,
+        layer_idx: int,
+        block_in: Any,  # mx.array
+        residual: Any,  # mx.array
+    ) -> Any:
+        """Apply the outer post-MoE ops: post_feedforward_layernorm,
+        residual add, optional layer_scalar multiply.
+
+        These three ops apply ONCE per decoder layer call on the full
+        [B, S, H] aggregated output (h1+h2). They were previously inlined
+        in ExpertOrchestrator.run_split_layer Phase C, dereferencing
+        `lm.text_model.layers[layer_idx]` directly. Phase 7-C-4 hides the
+        layer accessor behind this Backend method.
+        """
+        assert self._lm is not None
+        layer = self._lm.text_model.layers[layer_idx]
+        out = layer.post_feedforward_layernorm(block_in)
+        out = residual + out
+        if layer.layer_scalar is not None:
+            out = out * layer.layer_scalar
+        return out
+
     def finalize(self, h: mx.array) -> mx.array:
         assert self._lm is not None
         return mlx_engine.finalize(self._lm, h)

@@ -35,3 +35,21 @@ def test_phase_b_with_retry_no_lm_param() -> None:
     assert "lm" not in sig.parameters, (
         f"_phase_b_with_retry must not take `lm`; got params {list(sig.parameters)}"
     )
+
+
+def test_backend_protocol_has_apply_outer_decoder_ops() -> None:
+    """Phase 7-C-4 adds apply_outer_decoder_ops so Backend owns the
+    layer accessor that previously leaked via the `lm` parameter."""
+    import inspect
+
+    from model_shard.backends.base import Backend
+
+    method = getattr(Backend, "apply_outer_decoder_ops", None)
+    assert method is not None, (
+        "Backend protocol must declare apply_outer_decoder_ops"
+    )
+    sig = inspect.signature(method)
+    expected = {"self", "layer_idx", "block_in", "residual"}
+    assert set(sig.parameters) == expected, (
+        f"apply_outer_decoder_ops params {set(sig.parameters)} != {expected}"
+    )
