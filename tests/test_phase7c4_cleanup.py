@@ -72,14 +72,26 @@ def test_run_split_layer_no_lm_param() -> None:
 def test_aggregate_experts_batched_signature() -> None:
     """Backend.aggregate_experts now takes a top_k_ids ARRAY ([B, S, K])
     instead of a list[int] — the per-position loop moves into the
-    backend so run_split_layer can stop slicing/concating."""
+    backend so run_split_layer can stop slicing/concating.
+
+    With `from __future__ import annotations` in base.py annotations
+    are strings; `get_annotations(eval_str=True)` evaluates them under
+    the module's globals so we can compare against the resolved type.
+    """
     import inspect
 
     from model_shard.backends.base import Backend
 
-    sig = inspect.signature(Backend.aggregate_experts)
-    top_k_ids_param = sig.parameters["top_k_ids"]
-    annotation = top_k_ids_param.annotation
-    assert annotation is not list and annotation != list[int], (
-        f"top_k_ids should accept Activation (batched), got {annotation}"
+    annotations = inspect.get_annotations(
+        Backend.aggregate_experts, eval_str=True,
+    )
+    top_k_ids_annotation = annotations["top_k_ids"]
+    # In base.py, `Activation = Any`. We don't compare against Any
+    # directly (every annotation would match); instead we assert the
+    # old per-position list[int] annotation is gone.
+    assert top_k_ids_annotation is not list, (
+        f"top_k_ids must not be `list`; got {top_k_ids_annotation!r}"
+    )
+    assert top_k_ids_annotation != list[int], (
+        f"top_k_ids must not be `list[int]`; got {top_k_ids_annotation!r}"
     )

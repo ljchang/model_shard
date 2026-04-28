@@ -131,8 +131,6 @@ class MLXBackend:
         post_feedforward_layernorm_2 inside the per-position aggregate.
         """
         assert self._lm is not None
-        from model_shard import moe as _moe
-
         layer = self._lm.text_model.layers[layer_idx]
         post_ffn_ln_2 = layer.post_feedforward_layernorm_2
 
@@ -149,7 +147,7 @@ class MLXBackend:
                 weights_pos = top_k_weights[b : b + 1, ll : ll + 1, :]
                 shared_pos = shared_out[b : b + 1, ll : ll + 1, :]
                 cells.append(
-                    _moe.aggregate_experts(
+                    moe.aggregate_experts(
                         per_pos, ids_pos, weights_pos, shared_pos, post_ffn_ln_2,
                     )
                 )

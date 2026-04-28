@@ -134,10 +134,20 @@ class PyTorchBackend:
         top_k_weights: Any,               # [B, S, K] torch.Tensor
         shared_out: Any,                  # [B, S, H] torch.Tensor
     ) -> Any:
-        """Per-position aggregation on PyTorch. See MLXBackend docstring."""
-        assert self._model is not None
-        import torch
+        """Per-position aggregation on PyTorch.
 
+        Phase 7-C-4: this method now owns the per-position loop that
+        ExpertOrchestrator.run_split_layer used to drive. Pure helper
+        ``pt_moe.aggregate_experts`` is still per-position and is called
+        once per (b, l) here; final shape is built via torch.cat per row
+        and across rows.
+
+        Note on `shared_out`: unlike MLX (where `run_shared_expert`
+        already applies post_feedforward_layernorm_1), the PyTorch path's
+        `run_shared_expert` is pre-LN_1 and `pt_moe.aggregate_experts`
+        applies LN_1 to `shared_out` itself. The MLX/PyTorch asymmetry
+        is preserved here for parity with the HF reference forward."""
+        assert self._model is not None
         n_batch, n_seq, _n_k = top_k_ids.shape
         rows: list[Any] = []
         for b in range(n_batch):
