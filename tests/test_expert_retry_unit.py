@@ -118,7 +118,6 @@ def _run_test_fanout(
         layer_idx=15,
         request_id="req-1",
         initial_local_ids=[],
-        lm=None,  # local retry not exercised in these tests.
     )
     orch.close()
     return outputs, orch
@@ -230,7 +229,6 @@ def test_retry_to_self_cleans_up_in_flight():
         layer_idx=15,
         request_id="r-leak",
         initial_local_ids=[],
-        lm=None,
     )
     assert 7 in outputs
     # The critical assertion: no leaked _in_flight entry.

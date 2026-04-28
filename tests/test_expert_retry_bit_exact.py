@@ -84,7 +84,6 @@ def test_retry_output_matches_no_failure_output(lm):
         layer_idx=_LAYER,
         request_id="r-base",
         initial_local_ids=[],
-        lm=lm,
     )
     orch_nofail.close()
 
@@ -107,7 +106,6 @@ def test_retry_output_matches_no_failure_output(lm):
         layer_idx=_LAYER,
         request_id="r-fail",
         initial_local_ids=[],
-        lm=lm,
     )
     orch_fail.close()
 

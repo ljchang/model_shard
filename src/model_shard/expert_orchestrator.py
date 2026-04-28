@@ -344,7 +344,6 @@ class ExpertOrchestrator:
         layer_idx: int,
         request_id: str,
         initial_local_ids: list[int],
-        lm: Any,
         provenance_chain: list[ProvenanceEntry] | None = None,
         ar_hash: bytes | None = None,
     ) -> dict[int, mx.array]:
@@ -357,11 +356,7 @@ class ExpertOrchestrator:
         ``provenance_chain`` and ``ar_hash`` are threaded through for Phase 6-B
         provenance recording. When ``provenance_chain is None``, all provenance
         code is inert.
-
-        Phase 7-B: ``lm`` is unused after fallback removal; kept for
-        signature stability. Remove in 7-C when Node stops passing it.
         """
-        del lm  # unused, kept for signature stability
         import time as _time
 
         # ids we still need outputs for (local ids handled by caller).
@@ -647,7 +642,6 @@ class ExpertOrchestrator:
             layer_idx=layer_idx,
             request_id=request_id,
             initial_local_ids=local_ids,
-            lm=lm,
             provenance_chain=provenance_chain,
             ar_hash=ar_hash,
         )
