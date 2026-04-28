@@ -127,17 +127,37 @@ class PyTorchBackend:
         )
 
     def aggregate_experts(
-        self, layer_idx: int,
-        expert_outputs: dict[int, torch.Tensor],
-        top_k_ids: list[int],
-        top_k_weights: torch.Tensor,
-        shared_out: torch.Tensor,
-    ) -> torch.Tensor:
+        self,
+        layer_idx: int,
+        expert_outputs: dict[int, Any],   # {eid: [B, S, H] torch.Tensor}
+        top_k_ids: Any,                   # [B, S, K] torch.Tensor
+        top_k_weights: Any,               # [B, S, K] torch.Tensor
+        shared_out: Any,                  # [B, S, H] torch.Tensor
+    ) -> Any:
+        """Per-position aggregation on PyTorch. See MLXBackend docstring."""
         assert self._model is not None
-        return pt_moe.aggregate_experts(
-            self._model, layer_idx, expert_outputs, top_k_ids,
-            top_k_weights, shared_out,
-        )
+        import torch
+
+        n_batch, n_seq, _n_k = top_k_ids.shape
+        rows: list[Any] = []
+        for b in range(n_batch):
+            cells: list[Any] = []
+            for ll in range(n_seq):
+                ids_pos = [int(x) for x in top_k_ids[b, ll].reshape(-1).tolist()]
+                per_pos = {
+                    eid: expert_outputs[eid][b : b + 1, ll : ll + 1, :]
+                    for eid in ids_pos
+                }
+                weights_pos = top_k_weights[b : b + 1, ll : ll + 1, :]
+                shared_pos = shared_out[b : b + 1, ll : ll + 1, :]
+                cells.append(
+                    pt_moe.aggregate_experts(
+                        self._model, layer_idx,
+                        per_pos, ids_pos, weights_pos, shared_pos,
+                    )
+                )
+            rows.append(torch.cat(cells, dim=1) if n_seq > 1 else cells[0])
+        return torch.cat(rows, dim=0) if n_batch > 1 else rows[0]
 
     def apply_outer_decoder_ops(
         self,

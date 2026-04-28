@@ -60,9 +60,9 @@ class Backend(Protocol):
     def aggregate_experts(
         self, layer_idx: int,
         expert_outputs: dict[int, Activation],
-        top_k_ids: list[int],
-        top_k_weights: Activation,
-        shared_out: Activation,
+        top_k_ids: Activation,        # batched [B, S, K]
+        top_k_weights: Activation,    # batched [B, S, K]
+        shared_out: Activation,       # batched [B, S, H]
     ) -> Activation: ...
     def apply_outer_decoder_ops(
         self, layer_idx: int, block_in: Activation, residual: Activation,

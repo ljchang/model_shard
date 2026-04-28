@@ -646,46 +646,16 @@ class ExpertOrchestrator:
         )
         outputs.update(remote_outputs)
 
-        # Phase C — aggregation + outer ops. Re-acquire the lock for the
-        # final graph construction.
-        #
-        # Phase 7-C-1 Task 4: the three HF outer ops applied after the
-        # per-branch post_feedforward_layernorm_{1,2} + sum:
-        #   block_out = post_feedforward_layernorm(h1 + h2)  # THIRD outer norm
-        #   block_out = post_attn_residual + block_out       # outer residual
-        #   block_out *= layer.layer_scalar                  # layer_scalar mul
-        # See docs/superpowers/reference/2026-04-19-hf-gemma4-forward-signatures.md
-        # ("Decoder Layer body"). These apply ONCE per layer call on the full
-        # [B, S, H] aggregated output — NOT inside the per-position loop.
-        #
+        # Phase C — aggregation + outer ops, both via Backend.
+        # See Backend.aggregate_experts for the per-position routing logic
+        # and Backend.apply_outer_decoder_ops for the outer
+        # post_feedforward_layernorm + residual + layer_scalar chain.
+        # HF reference: docs/superpowers/reference/2026-04-19-hf-gemma4-forward-signatures.md
         is_pt = isinstance(self.backend, PyTorchBackend)
         with self._mlx_guard():
-            # Aggregate per position — same shape pattern as Task 9's proof.
-            h1_plus_h2 = mx.zeros_like(post_attn)
-            for b in range(top_k_ids.shape[0]):
-                for ll in range(top_k_ids.shape[1]):
-                    ids = [int(x) for x in top_k_ids[b, ll].tolist()]
-                    per_pos = {
-                        eid: outputs[eid][b : b + 1, ll : ll + 1, :] for eid in ids
-                    }
-                    weights = top_k_weights[b : b + 1, ll : ll + 1, :]
-                    per_pos_shared = shared_out[b : b + 1, ll : ll + 1, :]
-                    agg = self.backend.aggregate_experts(
-                        layer_idx, per_pos, ids, weights, per_pos_shared,
-                    )
-                    # Splice position ll of h1_plus_h2 with the per-position agg.
-                    h1_plus_h2 = (
-                        mx.concatenate(
-                            [h1_plus_h2[:, :ll, :], agg, h1_plus_h2[:, ll + 1 :, :]],
-                            axis=1,
-                        )
-                        if h1_plus_h2.shape[1] > 1
-                        else agg
-                    )
-
-            # Outer post-MoE ops (post_feedforward_layernorm + residual +
-            # layer_scalar) live behind Backend.apply_outer_decoder_ops as of
-            # Phase 7-C-4 — Backend owns the layer accessor.
+            h1_plus_h2 = self.backend.aggregate_experts(
+                layer_idx, outputs, top_k_ids, top_k_weights, shared_out,
+            )
             out: mx.array = self.backend.apply_outer_decoder_ops(
                 layer_idx, h1_plus_h2, post_attn,
             )

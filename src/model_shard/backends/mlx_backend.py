@@ -110,18 +110,51 @@ class MLXBackend:
         return moe.run_selected_experts(self._lm, h, layer_idx, expert_ids)
 
     def aggregate_experts(
-        self, layer_idx: int,
-        expert_outputs: dict[int, mx.array],
-        top_k_ids: list[int],
-        top_k_weights: mx.array,
-        shared_out: mx.array,
-    ) -> mx.array:
+        self,
+        layer_idx: int,
+        expert_outputs: dict[int, Any],   # {eid: [B, S, H] mx.array}
+        top_k_ids: Any,                   # [B, S, K] mx.array
+        top_k_weights: Any,               # [B, S, K] mx.array
+        shared_out: Any,                  # [B, S, H] mx.array
+    ) -> Any:
+        """Combine dense+MoE branches per position and concatenate.
+
+        Phase 7-C-4: this method now owns the per-position loop that
+        ExpertOrchestrator.run_split_layer used to drive. Pure helper
+        ``moe.aggregate_experts`` is still per-position and is called
+        once per (b, l) here; final shape is built via a single
+        mx.concatenate per row + one across rows.
+
+        Note on `shared_out`: it is already h1 = post_feedforward_layernorm_1(
+        mlp(pre_feedforward_layernorm(h))) per moe.run_shared_expert. So the
+        shared branch is pre-normed; only the MoE branch goes through
+        post_feedforward_layernorm_2 inside the per-position aggregate.
+        """
         assert self._lm is not None
+        from model_shard import moe as _moe
+
         layer = self._lm.text_model.layers[layer_idx]
-        return moe.aggregate_experts(
-            expert_outputs, top_k_ids, top_k_weights, shared_out,
-            layer.post_feedforward_layernorm_2,
-        )
+        post_ffn_ln_2 = layer.post_feedforward_layernorm_2
+
+        n_batch, n_seq, _n_k = top_k_ids.shape
+        rows: list[Any] = []
+        for b in range(n_batch):
+            cells: list[Any] = []
+            for ll in range(n_seq):
+                ids_pos = [int(x) for x in top_k_ids[b, ll].tolist()]
+                per_pos = {
+                    eid: expert_outputs[eid][b : b + 1, ll : ll + 1, :]
+                    for eid in ids_pos
+                }
+                weights_pos = top_k_weights[b : b + 1, ll : ll + 1, :]
+                shared_pos = shared_out[b : b + 1, ll : ll + 1, :]
+                cells.append(
+                    _moe.aggregate_experts(
+                        per_pos, ids_pos, weights_pos, shared_pos, post_ffn_ln_2,
+                    )
+                )
+            rows.append(mx.concatenate(cells, axis=1) if n_seq > 1 else cells[0])
+        return mx.concatenate(rows, axis=0) if n_batch > 1 else rows[0]
 
     def apply_outer_decoder_ops(
         self,
