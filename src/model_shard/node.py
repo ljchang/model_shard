@@ -83,16 +83,13 @@ class LastReplicaError(RuntimeError):
     live owner for the (layer, expert). The scanner's eviction pass catches
     this and skips the victim."""
 
-# Process-wide MLX serialization lock. In production each node is its own
+# Process-wide compute serialization lock. In production each node is its own
 # process, so this lock never contends. In the in-process test fixture we run
 # three nodes in a single Python process — concurrent MLX evaluations from
 # different threads on the shared LoadedModel can abort the Metal backend, so
 # we serialize the expert-RPC compute path (which is the only place multiple
-# node threads run MLX at the same time under Phase 3 expert splitting).
-_MLX_COMPUTE_LOCK = threading.Lock()
-# Phase 7-B: backend-neutral alias. _MLX_COMPUTE_LOCK kept for one release
-# for any external consumer; prefer _COMPUTE_LOCK in new code.
-_COMPUTE_LOCK = _MLX_COMPUTE_LOCK
+# node threads run compute at the same time under Phase 3 expert splitting).
+_COMPUTE_LOCK = threading.Lock()
 
 
 def _default_backend() -> Backend:
@@ -922,7 +919,7 @@ class Node:
                     return
 
             try:
-                with _MLX_COMPUTE_LOCK:
+                with _COMPUTE_LOCK:
                     outputs = self._backend.run_selected_experts(
                         layer_idx, h, requested
                     )
@@ -1353,7 +1350,7 @@ class Node:
             owners=owners,
             peer_rpc=TcpPeerRPC(addresses=addresses, timeout_s=30.0),
             rpc_timeout_s=30.0,
-            mlx_lock=_MLX_COMPUTE_LOCK,
+            mlx_lock=_COMPUTE_LOCK,
             loads_provider=_loads_provider,
             rng=_random_mod.Random(),
             heat_observer=self._heat_tracker.observe,

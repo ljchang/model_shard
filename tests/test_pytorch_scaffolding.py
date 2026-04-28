@@ -29,8 +29,11 @@ def test_pyproject_has_cuda_pytest_marker():
     )
 
 
-def test_compute_lock_alias_exists():
-    """_COMPUTE_LOCK is the new backend-neutral name; _MLX_COMPUTE_LOCK aliases
-    it for one release."""
-    from model_shard.node import _COMPUTE_LOCK, _MLX_COMPUTE_LOCK
-    assert _COMPUTE_LOCK is _MLX_COMPUTE_LOCK
+def test_compute_lock_exists():
+    """_COMPUTE_LOCK is the canonical backend-neutral compute lock name.
+    The Phase 7-B _MLX_COMPUTE_LOCK alias was retired in Phase 7-C-4."""
+    from model_shard import node
+    assert hasattr(node, "_COMPUTE_LOCK"), "_COMPUTE_LOCK must exist"
+    assert not hasattr(node, "_MLX_COMPUTE_LOCK"), (
+        "_MLX_COMPUTE_LOCK alias was retired in Phase 7-C-4"
+    )

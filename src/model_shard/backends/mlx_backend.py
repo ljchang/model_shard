@@ -18,7 +18,7 @@ class MLXBackend:
     Each instance owns one ``LoadedModel`` as ``self._lm``. The optional
     ``mlx_lock`` is used to serialize ``slice_expert`` / ``attach_expert``
     / ``detach_expert`` with concurrent MLX compute (Node passes its
-    process-wide ``_MLX_COMPUTE_LOCK`` here in production; unit tests may
+    process-wide ``_COMPUTE_LOCK`` here in production; unit tests may
     leave it unset and a backend-private lock is created).
     """
 

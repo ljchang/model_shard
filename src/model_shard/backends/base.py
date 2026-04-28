@@ -24,7 +24,7 @@ class Backend(Protocol):
     """Tensor-level operations a Node / ExpertOrchestrator calls.
 
     Each Backend instance owns exactly one loaded model. All methods are
-    thread-safe provided the caller holds the Node's _MLX_COMPUTE_LOCK
+    thread-safe provided the caller holds the Node's _COMPUTE_LOCK
     (or the backend's own equivalent serialization primitive)."""
 
     name: str  # "mlx" | "pytorch" | "executorch" ...

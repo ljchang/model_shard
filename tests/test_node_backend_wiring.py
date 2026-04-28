@@ -51,14 +51,14 @@ def test_node_accepts_explicit_backend():
 
 
 def test_node_passes_mlx_lock_into_backend():
-    """Node's _MLX_COMPUTE_LOCK is passed into MLXBackend.__init__ so
+    """Node's _COMPUTE_LOCK is passed into MLXBackend.__init__ so
     slice/attach/detach serialize against concurrent compute."""
-    from model_shard.node import _MLX_COMPUTE_LOCK
+    from model_shard.node import _COMPUTE_LOCK
     spec_a = _mk_spec("A", 32006)
     spec_b = _mk_spec("B", 32007)
     sm = ShardMap({"A": spec_a, "B": spec_b})
     lm = MagicMock()
     n = Node(shard=spec_a, shard_map=sm, loaded_model=lm, total_layers=30)
-    # Either the Node set the backend's lock to _MLX_COMPUTE_LOCK at init,
+    # Either the Node set the backend's lock to _COMPUTE_LOCK at init,
     # or the backend's lock is a private one. Prefer the former.
-    assert n._backend._mlx_lock is _MLX_COMPUTE_LOCK
+    assert n._backend._mlx_lock is _COMPUTE_LOCK
