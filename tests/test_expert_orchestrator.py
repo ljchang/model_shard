@@ -68,7 +68,6 @@ def test_orchestrator_all_local_matches_atomic(loaded_model: Any) -> None:
     )
     h_orch, cache_orch, masks_orch = _replay_through(lm, tokens, layer_idx)
     out_orch = orch.run_split_layer(
-        lm,
         h=h_orch,
         layer_idx=layer_idx,
         cache=cache_orch,
@@ -144,7 +143,6 @@ def test_orchestrator_multi_owner_routes_to_less_loaded(loaded_model: Any) -> No
             h = layer(h, mask, c, per_layer_input=None)
 
         _ = orch.run_split_layer(
-            lm,
             h=h,
             layer_idx=layer_idx,
             cache=cache,

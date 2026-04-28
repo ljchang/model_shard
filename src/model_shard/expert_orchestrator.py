@@ -550,7 +550,6 @@ class ExpertOrchestrator:
 
     def run_split_layer(
         self,
-        lm: Any,
         h: mx.array,
         layer_idx: int,
         cache: list[Any],
@@ -659,19 +658,7 @@ class ExpertOrchestrator:
         # ("Decoder Layer body"). These apply ONCE per layer call on the full
         # [B, S, H] aggregated output — NOT inside the per-position loop.
         #
-        # Backend-aware layer accessor:
-        #   MLX:     lm.text_model.layers[layer_idx]
-        #   PyTorch: pytorch_engine._text_model(lm).layers[layer_idx]
-        #            (HF wraps Gemma4TextModel in Gemma4Model.language_model
-        #             for multimodal configs; _text_model unwraps either shape)
-        # The outer ops themselves (LayerNorm, add, multiply) dispatch through
-        # the layer module's __call__ and work on either backend's tensor type.
         is_pt = isinstance(self.backend, PyTorchBackend)
-        if is_pt:
-            from model_shard.pytorch_engine import _text_model
-            layer = _text_model(lm).layers[layer_idx]
-        else:
-            layer = lm.text_model.layers[layer_idx]
         with self._mlx_guard():
             # Aggregate per position — same shape pattern as Task 9's proof.
             h1_plus_h2 = mx.zeros_like(post_attn)
@@ -696,15 +683,12 @@ class ExpertOrchestrator:
                         else agg
                     )
 
-            # Outer layer ops. The per-layer-input gating branch (HF lines
-            # 102-109) is skipped here because Gemma 4 26B has
-            # hidden_size_per_layer_input=0, so the gate modules are None.
-            # If that assumption changes, add a guard.
-            block_out = layer.post_feedforward_layernorm(h1_plus_h2)
-            block_out = post_attn + block_out
-            if layer.layer_scalar is not None:
-                block_out = block_out * layer.layer_scalar
-            out: mx.array = block_out
+            # Outer post-MoE ops (post_feedforward_layernorm + residual +
+            # layer_scalar) live behind Backend.apply_outer_decoder_ops as of
+            # Phase 7-C-4 — Backend owns the layer accessor.
+            out: mx.array = self.backend.apply_outer_decoder_ops(
+                layer_idx, h1_plus_h2, post_attn,
+            )
             if not is_pt:
                 mx.eval(out)
 

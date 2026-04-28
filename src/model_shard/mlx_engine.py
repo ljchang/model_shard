@@ -192,7 +192,6 @@ def run_layers(
                     f"layer {i} is split but no orchestrator given"
                 )
             h = orchestrator.run_split_layer(
-                lm,
                 h=h,
                 layer_idx=i,
                 cache=cache,

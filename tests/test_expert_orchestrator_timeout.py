@@ -41,5 +41,5 @@ def test_orchestrator_rpc_failure_raises_expert_rpc_failure(loaded_model) -> Non
         h = layer(h, mask, c, per_layer_input=None)
 
     with pytest.raises(ExpertRpcFailure, match="peer 'dead'"):
-        orch.run_split_layer(lm, h=h, layer_idx=15, cache=cache, masks=(gm, sm), request_id="r1")
+        orch.run_split_layer(h=h, layer_idx=15, cache=cache, masks=(gm, sm), request_id="r1")
     orch.close()

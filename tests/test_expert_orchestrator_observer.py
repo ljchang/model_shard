@@ -62,7 +62,7 @@ def test_observer_aborts_in_flight_rpc(loaded_model) -> None:  # type: ignore[no
     t0 = time.monotonic()
     with pytest.raises(ExpertRpcFailure, match="peer 'peer' left ALIVE"):
         orch.run_split_layer(
-            lm, h=h, layer_idx=15, cache=cache, masks=(gm, sm), request_id="r"
+            h=h, layer_idx=15, cache=cache, masks=(gm, sm), request_id="r"
         )
     elapsed = time.monotonic() - t0
     assert elapsed < 5.0, (

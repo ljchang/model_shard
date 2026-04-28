@@ -53,3 +53,17 @@ def test_backend_protocol_has_apply_outer_decoder_ops() -> None:
     assert set(sig.parameters) == expected, (
         f"apply_outer_decoder_ops params {set(sig.parameters)} != {expected}"
     )
+
+
+def test_run_split_layer_no_lm_param() -> None:
+    """7-C-4 finishes the lm-removal job: run_split_layer no longer
+    takes the lm handle. Backend.apply_outer_decoder_ops absorbs the
+    layer accessor."""
+    import inspect
+
+    from model_shard.expert_orchestrator import ExpertOrchestrator
+
+    sig = inspect.signature(ExpertOrchestrator.run_split_layer)
+    assert "lm" not in sig.parameters, (
+        f"run_split_layer must not take `lm`; got {list(sig.parameters)}"
+    )

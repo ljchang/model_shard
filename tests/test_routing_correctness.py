@@ -65,7 +65,7 @@ def test_multi_owner_orchestrator_picks_less_loaded_peer(loaded_model: Any) -> N
     try:
         h, cache, masks = _advance_to_layer(lm, layer_idx)
         out = orch.run_split_layer(
-            lm, h=h, layer_idx=layer_idx, cache=cache,
+            h=h, layer_idx=layer_idx, cache=cache,
             masks=masks, request_id="r1",
         )
         mx.eval(out)
@@ -113,7 +113,7 @@ def test_multi_owner_orchestrator_picks_peer_when_self_overloaded(
     try:
         h, cache, masks = _advance_to_layer(lm, layer_idx)
         orch.run_split_layer(
-            lm, h=h, layer_idx=layer_idx, cache=cache,
+            h=h, layer_idx=layer_idx, cache=cache,
             masks=masks, request_id="r2",
         )
         # If expert 0 appeared in top-k anywhere, it must have gone to peer.
