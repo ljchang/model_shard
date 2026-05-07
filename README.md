@@ -1,456 +1,255 @@
 # model_shard
 
-Gossip-based distributed MoE inference. Phase 1 prototype — see [plan](../../.claude/plans/fluffy-mapping-flurry.md).
+**Decentralized, gossip-coordinated inference for Mixture-of-Experts models across heterogeneous hardware.** A "CDN for experts" — nodes self-organize via gossip, route activations through a peer-to-peer pipeline, and migrate expert weights between machines based on observed load. No central scheduler.
+
+The reference target is **Gemma 4 26B-A4B-it** (30 layers, 128 routed experts, top-8 routing) running across a Mac (MLX) and one or more CUDA boxes (PyTorch).
+
+> **Status:** Research prototype. Single-machine 3-process pipeline is bit-exact to a single-process reference on all canonical prompts. Heterogeneous (Mac + DGX Spark + RTX 3090) cluster boots, gossips, and serves end-to-end inference; full multi-prompt smoke is blocked on an upstream PyTorch + Grace Blackwell + CUDA 13 kernel pathology, not on anything in this repo. See [Roadmap](#roadmap).
+
+---
+
+## What it does
+
+Conceptually, the project answers one question: **can a Mixture-of-Experts model be served by a swarm of heterogeneous machines that coordinate themselves, with no central scheduler, and remain correct under failure?**
+
+The components that make that work today:
+
+- **Pipeline sharding.** The model's transformer layers are partitioned across nodes. Activations flow peer-to-peer over length-prefixed TCP; the head dials the mid, mid dials the tail, the tail samples and returns the token to the head, which streams to the client.
+- **Expert sharding.** Within an MoE layer, the 128 routed experts are distributed across nodes. The node hosting a layer's attention block runs the router and fans out post-attention activations to peer nodes via `ExpertRequest` RPCs, then aggregates the top-k outputs.
+- **Partial expert loading.** A node only loads the experts it owns, dropping resident memory from ~14 GB per shard to ~4.5 GB chassis + `k/128 × 9 GB` of routed experts. This is what makes 24 GB-VRAM deployments (3090s) viable.
+- **Gossip membership (SWIM).** Each node runs a SWIM-style membership protocol over UDP. The head admits new requests only when every required shard is `ALIVE`; in-flight requests fail cleanly if a peer transitions out of `ALIVE` mid-decode.
+- **Dynamic expert migration.** Nodes track per-expert activation heat as an EMA, gossip top-N heat reports piggybacked on SWIM messages, and pull hot expert weights from peers over TCP, slotting them bit-exactly into a compact stacked tensor at runtime. Eviction (the inverse) runs under capacity pressure with last-writer-wins ownership convergence.
+- **Load-aware routing.** When an expert is replicated across multiple nodes, each top-k dispatch goes to the less-loaded candidate via power-of-two-choices using gossiped queue-depth EMAs.
+- **Fault tolerance.** Local retry to alternate replicas on peer failure; receive-time validation of a hash-chained provenance DAG that mirrors the model's true computation graph (rejects topology / authorization errors).
+- **Pluggable backends.** A `Backend` protocol abstracts every tensor-level operation. `MLXBackend` (Apple Silicon, bf16 or 4-bit) and `PyTorchBackend` (CUDA, bf16) implement the same 20-method surface, including `slice_expert` / `attach_expert` / `detach_expert` so partial-load + migration + eviction work on either side. The same wire protocol drives both.
+
+---
 
 ## Quickstart
 
+### Install
+
 ```bash
+# Apple Silicon (MLX backend, default)
 uv sync --extra dev
+
+# Linux / CUDA (PyTorch backend)
+uv sync --extra dev --extra pytorch
+
+# Regenerate protobuf bindings (only needed if proto/wire.proto changed)
 uv run python -m grpc_tools.protoc -I proto --python_out=src/model_shard/_pb proto/wire.proto
-uv run pytest
 ```
 
-## Phase 2 status: Gossip Discovery — complete
+### Single-machine 3-process demo
 
-Each node now runs a SWIM-style membership protocol over UDP (port `tcp_port + 1000`).
-The head admits `BeginRequest`s only when every required shard is `ALIVE`; in-flight
-requests fail with `Error{SHARD_UNAVAILABLE, is_final=true}` if a peer transitions
-out of `ALIVE` mid-decode. Set `ENABLE_GOSSIP=false` to bypass and reproduce Phase 1
-behavior. See `docs/superpowers/specs/2026-04-16-phase2-gossip-discovery-design.md`.
+This runs the full distributed pipeline on a single Mac with three node processes communicating over localhost TCP. Useful for development and as a correctness reference.
 
-## Phase 3 status: Expert-Level Sharding (single layer) — complete
+The default config (`config/shards.yaml`) expects a local bf16 conversion of `google/gemma-4-26B-A4B-it`. Convert it once (~48 GB to disk):
 
-Layer 15's 128 routed experts are distributed round-robin across the three nodes via
-the new `moe_experts` field in `config/shards.yaml`. The node hosting the layer's
-attention block (`layer_10-20`) runs the router and fans out post-attention activations
-to peer nodes via `ExpertRequest` over the existing TCP envelope transport; peer
-responses are aggregated in top-k slot order for bit-strict Tier 1 reproduction.
-In-flight peer failure surfaces as `ExpertRpcFailure` in the orchestrator and becomes
-`Error{SHARD_UNAVAILABLE}` to the client; the Phase 2 membership observer aborts
-pending RPCs immediately when a peer leaves `ALIVE`. Set `ENABLE_EXPERT_SHARD=false`
-(default) to bypass and reproduce Phase 2 behavior. See
-`docs/superpowers/specs/2026-04-16-phase3-expert-sharding-design.md`.
+```bash
+uv run python scripts/convert_mlx_bf16.py \
+  --hf-source google/gemma-4-26B-A4B-it \
+  --output-dir ~/.cache/mlx-models/gemma-4-26b-a4b-it-bf16
+```
 
-## Phase 5a status: Partial Expert Weight Loading — complete
+Then in three terminals:
 
-A node can now load only the routed experts listed in its shard's `moe_experts`
-YAML instead of the full 128-expert stack per layer. Opt-in via
-`ENABLE_PARTIAL_LOAD=true`. Resident memory per shard drops from ~14 GB to
-chassis (~4.5 GB) + `k/128 × 9 GB` for routed experts, which is the unlock for
-eventual 24 GB-VRAM deployments. Correctness is proven by
-`tests/test_partial_load_bit_exact_per_expert.py` (per-expert bit-exact vs
-full load) and `tests/test_partial_load_split_equivalence.py` (three mod-3
-sliced shards compose bit-exact to atomic layer 15). `run_selected_experts`
-handles the global→local expert-id translation; stock mlx-vlm `Experts` /
-`SwitchLinear` modules are untouched. See
-`docs/superpowers/specs/2026-04-17-phase5a-partial-expert-loading-design.md`.
+```bash
+uv run python scripts/run_node.py --config config/shards.yaml --shard layer_0-10
+uv run python scripts/run_node.py --config config/shards.yaml --shard layer_10-20
+uv run python scripts/run_node.py --config config/shards.yaml --shard layer_20-30
+```
 
-## Phase 5b status: Dynamic Expert Migration — complete
+In a fourth terminal, drive the cluster:
 
-A node can now request expert weights from any peer over TCP and slot them
-bit-exactly into its compact stacked tensor at runtime. Opt-in via
-`ENABLE_DYNAMIC_MIGRATION=true` (requires `ENABLE_PARTIAL_LOAD=true`). Scope:
-(A) per-(layer, expert) heat tracking as an EMA, (B) target-pull migration RPC,
-and (D) decode-loop hang fix; (C) policy threshold is a simple stub. Each node
-tracks expert activation heat; a background scanner periodically identifies
-experts that exceed `MIGRATION_HEAT_THRESHOLD` and issues pull requests to peers
-that hold the weights. Heat reports and ownership `ADD` deltas piggyback on
-existing SWIM `Ping`/`Ack`/`PingReq`/`PingReqAck` messages; `ExpertOrchestrator`
-routing resolves live owners via a `live_owners_provider` callback that unions
-the bootstrap `ShardSpec` with gossip-observed `ADD` deltas. Correctness is
-proven by `tests/test_migration_bit_exact_per_expert.py` (slice→attach bit-exact
-on real Gemma weights) and `tests/test_migration_over_tcp.py` (same proof across
-a real TCP round-trip). The decode-loop hang fix uses observer-triggered
-queue-poison to unblock the head immediately when any peer leaves `ALIVE`
-mid-decode; verified by `tests/test_decode_hang_fix_e2e.py`. Tier 1 regression:
-`tests/test_partial_load_tier1_migration.py` runs all 5 canonical prompts with
-both flags ON and confirms token-id bit-exact to the Phase 1 reference. Known
-carryover from 5a §7.5: sort-path FP noise limits bit-exactness to B*Seq ≤ 7 or
-prompts ≤ 8 tokens — documented in the spec. See
-`docs/superpowers/specs/2026-04-17-phase5b-dynamic-migration-design.md`.
+```bash
+uv run python scripts/run_client.py \
+  --config config/shards.yaml \
+  --prompt-set tests/prompts.json \
+  --out-dir artifacts/run \
+  --max-new-tokens 16
+```
 
-## Phase 6-A status: Expert-Peer Retry — complete
+For comparison, capture single-process oracle output:
 
-When a peer fails mid-fan-out, the node's local `ExpertOrchestrator` now retries to
-an alternate replica rather than surfacing `ExpertRpcFailure` immediately. The retry
-loop lives in `ExpertOrchestrator._phase_b_with_retry` inside `run_split_layer` Phase B.
-Each invocation maintains a per-call excluded-peer set; on failure the failed peer is
-added to that set and `live_owners_provider` is re-queried with exclusions applied,
-so subsequent attempts land on a different replica. Partial outputs from peers that
-already completed are preserved across the retry; only the failed slot is re-dispatched.
-Decentralization is fully preserved: the retry decision is local to the node performing
-the fan-out — no central coordinator is consulted.
+```bash
+uv run python scripts/run_reference.py \
+  --prompt-set tests/prompts.json \
+  --out-dir artifacts/ref \
+  --max-new-tokens 16
+```
 
-Gate: `ENABLE_EXPERT_RETRY=true` (default). Env knobs: `EXPERT_RETRY_MAX_ATTEMPTS`
-(default 3) and `EXPERT_RETRY_BACKOFF_MS` (default "100,500", comma-separated list of
-per-attempt delays in milliseconds). Setting `ENABLE_EXPERT_RETRY=false` reverts to
-Phase 3 behavior (immediate failure on any peer error).
+### Heterogeneous cluster (Mac + CUDA)
 
-Correctness proof: `tests/test_expert_retry_bit_exact.py` asserts `mx.array_equal`
-between a no-failure run and a one-shot-failure-plus-retry run on real Gemma weights
-across all 6 experts. This relies on Phase 5b's property that any valid replica of
-expert E produces identical output to any other. E2E coverage:
-`tests/test_expert_retry_e2e.py` kills a replica-holding shard mid-generation and
-verifies the client exits cleanly — either via retry-carries-through or via the Phase 5b
-Task 18 queue-poison fallback. In the canonical 3-node config every shard is
-simultaneously a pipeline peer and an expert host, so killing any shard breaks the
-activation pipeline; the E2E therefore exercises the no-hang fallback path. The pure
-replica-preserving retry path is proven by the unit and bit-exact tests.
+See `config/shards.heterogeneous.example.yaml` for a 3-machine template (Mac MLX head + DGX Spark PyTorch mid + RTX 3090 PyTorch tail) over Tailscale. All nodes must gossip the same `model_id` for cluster admission. On the CUDA boxes, set `MODEL_SHARD_BACKEND=pytorch` (or rely on auto-detect — MLX on Apple Silicon, PyTorch elsewhere).
 
-Non-goals: pipeline-peer failure (requires redundant-layer-range design in shards.yaml —
-separate sub-project), head-peer failure (client-side story), Byzantine (Phase 6-B).
-Phase 6 decomposes into three independent sub-projects: 6-A (retry, this), 6-B
-(provenance verification), and 6-C (eviction + REMOVE OwnershipDelta). See
-`docs/superpowers/specs/2026-04-17-phase6a-expert-retry-design.md`.
+---
 
-## Phase 6-C status: Expert Eviction — complete
+## Configuration
 
-A node can now evict migration-added experts under capacity pressure via
-`OwnershipDelta{REMOVE}` gossip with last-writer-wins convergence on
-`ts_unix_ms`. Gate: `ENABLE_EVICTION=true` (default on). Knob:
-`MIGRATION_EVICT_COOLDOWN_SECONDS=30`.
+### Backend selection
 
-`detach_expert` is the inverse of Phase 5b's `attach_expert`: it shrinks
-the compact stacked tensor via a complementary-index `mx.take` under
-`_COMPUTE_LOCK`, so tensor mutation is serialized with any in-flight
-`ExpertRequest`. `MigrationScanner._maybe_evict_one` runs after the pull
-pass under the same single-in-flight lock, fires only at capacity, and
-selects the coldest-heat migration-added expert as the eviction victim.
+| Variable | Values | Default |
+|---|---|---|
+| `MODEL_SHARD_BACKEND` | `mlx`, `pytorch` | auto-detect (MLX on Apple Silicon, PyTorch elsewhere) |
+| `MLX_MODEL_BF16_LOCAL_PATH` | filesystem path | `~/.cache/mlx-models/gemma-4-26b-a4b-it-bf16` |
 
-Safety invariants: bootstrap-held experts are never evicted; a last-replica
-local check refuses eviction if no other live owner is known; the 30-second
-attach cooldown prevents attach/evict oscillation; compute-lock
-serialization prevents tensor mutation under an in-flight compute.
+### Feature flags
 
-Phase 5b's `_ownership_seen: set` (ADD-only) was promoted to
-`_ownership_view_internal: dict[(shard, L, E), (action, ts_unix_ms)]` with
-last-writer-wins convergence. The `owners_of()` contract is preserved — it
-still returns the set of ADD shard_ids visible to callers.
+Each major capability ships behind an env flag so a regression can be bisected against a single variable. Defaults are conservative — `ENABLE_GOSSIP`, `ENABLE_EXPERT_RETRY`, and `ENABLE_EVICTION` are on; everything else is opt-in.
 
-Significant carry-forward bug fix discovered during Task 7 E2E: `Node.owners_of`
-was disconnected from `MembershipRunner` gossip — only bootstrap and
-self-announcements were visible; peer-announced deltas never reached the
-node's ownership view. Fixed with an observer pattern:
-`MembershipRunner.register_ownership_observer` fires callbacks after each
-LWW acceptance, and `Node._on_gossip_ownership_delta` applies them via its
-own LWW. This corrects a latent Phase 5b/6-A/6-B bug in which multi-node
-ownership gossip was effectively invisible to `ExpertOrchestrator`
-live-routing, Phase 6-A retry exclusion, and Phase 6-B provenance
-authorization. A companion latent fix: `_handle_expert_request` now
-consults `_live_experts` (runtime) rather than `self._shard.moe_experts`
-(bootstrap), so migration-attached experts are served correctly and evicted
-experts correctly return `ERR_WRONG_SHARD`.
+| Variable | Default | Effect |
+|---|---|---|
+| `ENABLE_GOSSIP` | `true` | SWIM membership over UDP (`tcp_port + 1000`); head admits requests only when all shards are `ALIVE`. |
+| `ENABLE_EXPERT_SHARD` | `false` | Distribute MoE experts across nodes via `ExpertRequest` RPCs. |
+| `ENABLE_PARTIAL_LOAD` | `false` | Load only the experts listed in this shard's `moe_experts` (precondition for migration). |
+| `ENABLE_DYNAMIC_MIGRATION` | `false` | Heat-driven pull-migration of expert weights between nodes. Requires `ENABLE_PARTIAL_LOAD=true`. |
+| `ENABLE_EXPERT_RETRY` | `true` | On peer failure, retry to an alternate replica before surfacing the error. |
+| `ENABLE_EVICTION` | `true` | Evict cold migration-added experts under capacity pressure with LWW gossip. |
+| `ENABLE_PROVENANCE` | `false` | Receive-time validation of a hash-chained provenance DAG; rejects topology / authorization errors with `ERR_INVALID_PROVENANCE`. |
 
-Correctness proofs: `tests/test_partial_load_detach.py` (attach→detach
-roundtrip byte-identical); `tests/test_ownership_view_convergence.py`
-(ADD/REMOVE LWW convergence); `tests/test_eviction_e2e.py` (3-node cluster
-attach+evict cycle with gossip convergence); and
-`tests/test_eviction_race_with_expert_request.py` (post-eviction
-`ExpertRequest` returns `ERR_WRONG_SHARD`). Non-goals: quorum last-replica,
-two-phase tentative eviction, memory-pressure probing — Phase 7+. Phase 6
-trilogy complete: 6-A retry, 6-B provenance, 6-C eviction all shipped. See
-`docs/superpowers/specs/2026-04-18-phase6c-eviction-design.md`.
+Tuning knobs (selected): `MIGRATION_HEAT_THRESHOLD`, `MIGRATION_SCAN_INTERVAL_SECONDS`, `MIGRATION_EVICT_COOLDOWN_SECONDS`, `EXPERT_RETRY_MAX_ATTEMPTS`, `EXPERT_RETRY_BACKOFF_MS`. See `src/model_shard/node.py` for the full list and defaults.
 
-## Phase 7-A status: Backend Protocol + MLXBackend — complete
+### Debug endpoints
 
-A `Backend` protocol plus an `MLXBackend` wrapper now sit between `Node` /
-`ExpertOrchestrator` and every tensor-level operation, with zero behavioral
-change on default MLX deployments. The stateful backend class owns the
-`LoadedModel` internally; consumers receive opaque `Activation`, `Cache`,
-`Mask`, and `TopK` handles and either pass them straight back into other
-backend calls or serialize via `tensor_to_bytes`. `Node.__init__(backend=None)`
-defaults to `MLXBackend()`; legacy `loaded_model=` callers remain supported via
-`MLXBackend.from_loaded_model`. `ExpertOrchestrator` gains a `backend` field
-and routes every compute call through `self.backend.X()`; a temporary
-`backend=None` fallback preserves Phase 1–6 construction patterns and will be
-removed in Phase 7-B. `mlx_engine.py` gained a public `run_layer_atomic`
-helper plus a `mx_to_wire_dtype` alias so backends do not depend on private
-names. Correctness is preserved: Tier 1 is bit-exact to the Phase 1 reference
-under the default `MLXBackend`, and every Phase 1–6 E2E test (migration,
-retry, provenance, eviction) passes unchanged. The point of Phase 7-A is the
-seam: Phase 7-B will add a `PyTorchBackend` for CUDA / DGX Spark, and Phase
-7-C a heterogeneous cluster with an `allclose` + top-1 correctness bar across
-platforms. See
-`docs/superpowers/specs/2026-04-19-phase7a-backend-protocol-design.md`.
+Each node exposes two HTTP endpoints alongside its TCP port:
 
-## Phase 7-B status: PyTorchBackend + DGX Spark — complete
+- `http://<host>:<tcp_port + 2000>/membership` — SWIM membership view.
+- `http://<host>:<tcp_port + 2000>/loads` — gossiped queue-depth EMAs.
 
-A `PyTorchBackend` now implements the full `Backend` protocol over HF
-`transformers` `Gemma4ForCausalLM` loaded in bfloat16 on DGX Spark
-(GB10 Grace Blackwell, SM_121, 128 GB unified LPDDR5X). The module
-layout mirrors the MLX side: `pytorch_engine.py` holds the forward-pass
-primitives (load, embed, cache, `run_layer_atomic`, finalize, wire
-serialization), `pt_moe.py` holds the split-layer MoE helpers
-(attention + route, shared expert, per-expert compute, aggregate), and
-`pt_partial_load.py` holds the slice/attach/detach operations against
-HF's stacked expert tensors. `backends/pytorch_backend.py` is a thin
-delegation wrapper that owns the HF model instance. All 20 protocol
-methods are parity with `MLXBackend`, including `slice_expert`,
-`attach_expert`, and `detach_expert`, so Phase 5a/5b/6-C features
-(partial load, dynamic migration, eviction) are available on Spark.
-Backend selection is driven by the `MODEL_SHARD_BACKEND=pytorch|mlx`
-env var, falling back to auto-detect (MLX on Apple Silicon, PyTorch
-elsewhere). The Phase 7-A temporary shims are gone:
-`ExpertOrchestrator.backend=None` fallback and `Node._lm` property both
-deleted. Correctness bar: `tests/test_pytorch_tier1.py` asserts top-1
-agreement against a fixture generated once on Spark and committed.
-Cross-backend parity (MLX vs PyTorch) is deferred to Phase 7-C, along
-with 4-bit quantization on PyTorch, heterogeneous clustering, and perf
-tuning. See
-`docs/superpowers/specs/2026-04-19-phase7b-pytorch-backend-design.md`.
+---
 
-## Phase 7-C-1 status: Real HF Gemma 4 forward integration — complete
+## Architecture
 
-Phase 7-C-1 closes the Phase 7-B synthetic-test gap by wiring
-`PyTorchBackend` against HF `transformers`' real `Gemma4TextDecoderLayer.forward`
-with the correct signatures, rather than the stub-shaped call sites that
-Phase 7-B's unit tests exercised. Tasks 1-5 (landed Mac-side) handled
-the architectural refactor from a reading of HF source: the cache kwarg
-is `past_key_values` (plural) and the decoder returns a plain tensor
-rather than a tuple; the router returns a 3-tuple `(probs, weights,
-index)` from which only `weights` and `index` are consumed; the dense
-MLP always runs alongside the MoE branch, and the two combine via
-per-branch `post_feedforward_layernorm_{1,2}` summed, then an outer
-`post_feedforward_layernorm` + residual + per-layer `layer_scalar`
-multiply; `layer_type` lives on `self_attn`, not the decoder layer;
-real configs wrap `Gemma4TextConfig` so nested access goes through
-`config.get_text_config()`; `shared_kv_states={}` is required on
-attention even when `num_kv_shared_layers=0`; and rotary embeddings are
-per-layer-type, not per-layer-index. Implementation: `make_masks`
-returns `(rotary_dict, attn_mask_dict)` keyed by layer_type through the
-existing `masks` tuple slot; `run_layer_atomic` and
-`pt_moe.run_attention_and_route` call the HF layer / attention with full
-kwargs; the orchestrator applies outer layernorm + residual +
-`layer_scalar` after the per-position aggregate loop via a backend-aware
-layer accessor so the MLX path is unaffected. Task 6b (landed on DGX
-Spark) caught four more real-HF divergences that synthetic tests had
-masked: `model.model` is a `Gemma4Model` multimodal wrapper with the
-text model nested as `.language_model` (added a `_text_model()` helper
-used across `pytorch_engine`, `pt_moe`, `pt_partial_load`, and the
-orchestrator); `num_layers` must read via `len(_text_model(...).layers)`
-rather than `config.num_hidden_layers` (the multimodal config doesn't
-expose it); `final_logit_softcapping = 30.0` on the real 26B model and
-must be applied after `lm_head`; and the fixture generator was rewritten
-to greedy-decode through `PyTorchBackend` itself rather than HF's
-`model.generate()`, so Tier-1 is an *internal* regression (our forward
-path doesn't drift) rather than a cross-framework equivalence check.
-Testing: 16 synthetic units in `test_pytorch_engine.py`, 8 in
-`test_pt_moe_unit.py`, 3 slow CPU integration tests in
-`test_pytorch_tiny_hf_integration.py` that instantiate a tiny real
-`Gemma4ForCausalLM` from config and verify end-to-end plumbing, and
-`tests/test_pytorch_tier1.py` now a permanent Spark-side regression
-against the committed fixture. MLX slow regression bucket (all 6 files)
-stays green. Cross-framework parity (MLX ↔ PyTorch ↔ HF) is explicitly
-deferred to Phase 7-C-2. See
-`docs/superpowers/specs/2026-04-19-phase7c1-real-hf-integration-design.md`.
+```
+                            ┌───────────────────────────────────────┐
+                            │           Gossip plane (UDP)          │
+                            │   SWIM membership + heat reports +    │
+                            │   ownership ADD/REMOVE deltas (LWW)   │
+                            └───────────────────────────────────────┘
+                                   │           │           │
+Client → head (layers 0-9) ─activations→ mid (layers 10-19) ─activations→ tail (layers 20-29)
+   ▲                              │                │                              │
+   │                              ▼                ▼                              │
+   │                      ExpertRequest        ExpertRequest                      │
+   │                      (fan out top-8       (fan out top-8                     │
+   │                       to expert hosts)     to expert hosts)                  │
+   │                                                                              │
+   └─────────────────────── SampledToken (tail → head → client) ──────────────────┘
+```
 
-## Phase 7-C-2 status: Cross-Backend Correctness Harness — complete
+Each node is one OS process. Inbound connections are handled one thread per peer; outbound peer connections are persistent. The head's client-handler thread drives the decode loop by `queue.get()`-ing `SampledToken`s from the tail.
 
-Phase 7-C-2 establishes an empirical agreement bar between `MLXBackend`
-(Mac, 4-bit Gemma 4) and `PyTorchBackend` (DGX Spark, bf16 Gemma 4) by
-comparing tier-1 fixtures recorded as top-K (K=5) softmax-weighted token
-sets per decode position. A unified fixture generator dispatches on
-`MODEL_SHARD_BACKEND=mlx|pytorch` and emits `mlx_tier1_tokens.json` /
-`pytorch_tier1_tokens.json` in identical shape. `top_k_ids_and_weights`
-helpers added to both `mlx_engine.py` and `pytorch_engine.py` (matching
-signatures; softmax cast to float32 on both sides for numerical
-stability). A device-independent pytest
-(`tests/test_cross_backend_correctness.py`) loads both JSONs and asserts
-two agreement floors: at least one of three prompts matches on
-position-0 top-1, and the average top-5 intersection size across all
-(prompt, position) pairs is at least 0.5. Observed at landing: 1/3
-position-0 matches and 1.03 average top-5 overlap across 30 positions —
-well above the random-chance baseline (~0 on vocab=262K) but far from
-identical, consistent with the known 4-bit vs bf16 precision gap. The
-agreement floors are calibrated as regression guards, not tightness
-bars; tokenizer equivalence is asserted separately
-(`mlx-community/gemma-4-26b-a4b-it-4bit` and `google/gemma-4-26B-A4B-it`
-share the same tokenizer). A side-by-side markdown report
-(`tests/fixtures/cross_backend_comparison.md`) is regenerated every run
-for eyeball diagnostics. Non-goals (deferred): activation-level
-`allclose`, KL/JS divergence metrics, online cross-machine harness,
-heterogeneous gossip cluster (Phase 7-C-3), and tech-debt cleanup
-(Phase 7-C-4). See
-`docs/superpowers/specs/2026-04-20-phase7c2-cross-backend-correctness-design.md`.
+### Wire protocol
 
-## Phase 7-C-3a status: Bf16 Canonical Rebaseline — complete
+`proto/wire.proto` is the source of truth. The `Envelope` is a oneof of:
 
-Phase 7-C-3a replaces the 4-bit MLX path (`mlx-community/gemma-4-26b-a4b-it-4bit`)
-as the canonical Mac model with a local bf16 conversion produced once
-from `google/gemma-4-26B-A4B-it` — the same HuggingFace source the
-PyTorch path uses on DGX Spark. After the rebaseline, MLX (Mac) and
-PyTorch (Spark) consume the same source weights, and cross-backend
-top-K agreement jumped from 1/3 position-0 top-1 matches and 1.03
-average top-5 overlap (the 4-bit-vs-bf16 baseline) to 3/3 and 3.07
-respectively. The remaining drift is MLX/PyTorch kernel rounding,
-not weight-level precision.
+| Message | Direction | Purpose |
+|---|---|---|
+| `BeginRequest` | client → head | Start a generation request (prompt + max tokens). |
+| `Activation` | node → downstream | Forward hidden state along the pipeline. |
+| `ExpertRequest` / `ExpertResponse` | router → expert host | Fan-out / aggregate within an MoE layer. |
+| `SampledToken` | tail → head, head → client | Newly sampled token (with `is_final`). |
+| `EndRequest` | tail → upstream | Cleanup KV-cache slots along the chain. |
+| `Error` | any → upstream | Structured error (admission, peer-down, provenance). |
 
-Conversion is one-time via `scripts/convert_mlx_bf16.py` (no defaults
-baked in: `--hf-source` and `--output-dir` are both required CLI args).
-The script wraps `mlx_vlm.convert` (not `mlx_lm.convert`) so the
-multimodal Gemma 4 layout — vision tower included — is preserved;
-`mlx_vlm.load` requires it even when only language inference is
-exercised. Output disk: ~48 GB.
+Tensors are serialized out-of-band: `[msg_len:4][msg][tensor_len:4][tensor]`.
 
-All hardcoded model-id string literals were removed from code:
-`config/shards.yaml::model_id` is now the single source of truth and
-required at YAML-load time. `ShardMap.model_id` is exposed as a
-required field; `Node` default-backend construction reads it from the
-shard map and raises if absent. Hardcoded literals were removed from
-one source file (`node.py`), four entry-point scripts (`run_node.py`,
-`run_client.py`, `run_reference.py`,
-`generate_tier1_comparison_fixture.py`), and twelve test files
-including the conftest fixture.
+### Source layout
 
-Multi-load bit-exactness tests (split equivalence, per-expert bit-exact,
-migration bit-exact) opt into a parallel `config/shards.tests.yaml`
-that points at the smaller 4-bit MLX model — three or four full-bf16
-model instances in one Python process don't fit comfortably on a
-128 GB M5, but the math under test is precision-independent. Production
-cluster (`config/shards.yaml`) stays on bf16. All Phase 1–6 slow
-buckets and the Phase 7-A backend regression are green on the new
-baseline; the cross-backend test floors are tightened to the post-
-rebaseline observed values. Two heavy E2E tests
-(`test_partial_load_tier1_e2e.py`, `test_partial_load_tier1_migration.py`)
-that load three partial-bf16 Nodes in one pytest process are documented
-as redundant with faster bit-exact unit tests and skipped from the
-default slow run; they remain runnable manually. See
-`docs/superpowers/specs/2026-04-23-phase7c3a-bf16-rebaseline-design.md`.
+```
+src/model_shard/
+├── shard.py, shard_map.py         Static topology (YAML-backed)
+├── request.py                     Request + ProvenanceEntry chain
+├── transport.py, envelope.py      Length-prefixed TCP framing
+├── node.py                        Decentralized node, decode loop, env-flag gates
+├── client.py                      Thin client (BeginRequest + token stream)
+├── expert_orchestrator.py         Phase-A/B/C MoE fan-out + retry + provenance
+├── moe.py, partial_load.py        Pure MLX MoE helpers
+├── pt_moe.py, pt_partial_load.py  PyTorch counterparts (HF-correct forward)
+├── mlx_engine.py, pytorch_engine.py    Per-backend forward primitives
+├── backends/                      Backend protocol + MLXBackend + PyTorchBackend
+├── membership/                    SWIM gossip (UDP, observer pattern)
+├── heat.py, migration.py          Per-expert EMA + pull-migration scanner
+├── load.py                        Gossiped queue-depth + power-of-two-choices
+├── provenance.py                  BLAKE2b-256 hash-chained DAG
+├── reference.py                   Single-process oracle (correctness baseline)
+└── _pb/                           Generated protobuf bindings
+```
 
-## Phase 7-C-3b status: Heterogeneous Cluster Smoke — partial
+---
 
-Phase 7-C-3b's goal is a single inference cluster with shards running
-on different backends — MLX on Apple Silicon, PyTorch CUDA elsewhere
-— all serving the same source weights. Tasks 1-8 (cross-backend wire
-format, gossiped `model_id` admission contract, MLX HF-id resolver,
-2-subprocess heterogeneous pytest, deployment runbook) landed cleanly
-on Mac. Task 9 — the manual smoke verification on real Mac + DGX
-Spark + RTX 3090 hardware — is partially passing.
+## Tests
 
-**What works.** A 3-machine heterogeneous cluster boots (Mac MLX bf16
-head, Spark PyTorch CUDA bf16 mid, 3090 PyTorch CUDA bf16 tail). All
-three nodes converge to ALIVE in every other's gossip view. Tail's
-streaming partial-load (`pt_partial_load.load_model_partial`) reads
-expert tensors one at a time via `safetensors.safe_open` and skips
-layers outside the shard's range entirely, so the 3090 fits in
-~18 GB of its 24 GB VRAM (vs the prior implementation that materialized
-the full ~52 GB bf16 model on device before slicing). End-to-end
-inference works: a 5-token prompt yields 16 tokens through Mac MLX →
-Spark PyTorch CUDA → 3090 PyTorch CUDA in ~14-28 seconds; subsequent
-same-shape prompts yield 4 tokens in ~1 second.
+```bash
+uv run pytest                                      # fast suite (~380 tests, no model load)
+uv run pytest -m slow                              # loads the bf16 model (~52 GB)
+uv run pytest -m slow tests/test_tier1_tokens.py   # bit-exact token regression
+uv run pytest -m slow tests/test_tier2_hidden.py   # per-layer hidden-state agreement
+uv run ruff check src tests scripts
+uv run mypy src/model_shard
+```
 
-**What didn't.** The full runbook smoke (5 prompts of varying length
-× 16 tokens) does not complete because of a `torch.nn.functional.grouped_mm`
-pathology on Grace Blackwell + CUDA 13. The 11-token
-"In computer science, a Mixture-of-Experts model" prompt's first
-forward through Spark's mid shard takes **~55 minutes** to resolve
-the cuBLAS-LT path-selection heuristic for input shape `(1, 11, 2816)`
-× weight `(num_experts, ..., ...)` in bf16. The 5-token shape resolves
-in seconds. Investigation in 2026-04-26 confirmed: it is not
-`torch.compile`, not Triton, not Inductor — bare cuBLAS-LT path
-selection for one specific MoE shape. The CUDA driver cubin cache
-(`~/.nv/ComputeCache`) does not preserve resolved kernels usefully
-across requests in this configuration; second 11-token request also
-takes ~55 minutes. While compute is in flight the GIL is held
-continuously, which starves SWIM gossip and causes peers to flap
-mid SUSPECT/ALIVE — a downstream symptom, not the root cause. This
-is a PyTorch + Grace Blackwell + CUDA 13 issue, not a model_shard
-correctness bug; the cluster's wire protocol, gossip, admission, and
-EndRequest propagation all behave correctly throughout.
+Two correctness tiers anchor the project:
 
-**Smoke output is degenerate (model behavior).** Greedy decoding on
-Gemma 4 26B-A4B-it without an instruction prefix loops back to copy
-prompt tokens — both the cluster and the bf16 oracle produce different
-degenerate loops on the same prompts. Bit-exact comparison against
-the oracle fails because of cross-backend bf16 numerical drift in the
-last-bit sense (Phase 7-C-2 already documented this with calibrated
-top-K agreement floors instead of exact match). The cluster is
-producing semantically valid model output; what differs is just which
-particular token gets argmaxed when the top two logits are nearly
-tied.
+- **Tier 1 — token bit-exactness.** The 3-shard distributed pipeline produces token-identical output to the single-process reference on all 5 canonical prompts in `tests/prompts.json`.
+- **Tier 2 — per-layer hidden-state tolerance.** Per-layer hidden states agree with the reference within `< 1e-3`.
 
-**Sixteen real-deployment bugs fixed during Task 9.** Memory-management
-fixes (streaming partial-load, layer-range skip), cross-platform fixes
-(`mlx.core` import gates across 7 modules, `0.0.0.0` bind for
-TCP/UDP, IPv4-forced `gethostbyname` for Tailscale dual-stack),
-membership protocol fixes (wall-clock-seeded `self_incarnation` so
-restarted nodes beat cached DEAD records via LWW; incoming UDP
-implies-alive promotion; `_handle_end` propagation + outbound close
-at every shard so prompt N+1 doesn't desync on a stale stream),
-backend-detect fix (PyTorch+CUDA 12.8 install on the 3090 to bridge
-the driver-545 / torch-cu130 gap), and a startup-ordering refactor
-(membership runner builds and starts BEFORE the slow model load so
-peers stay responsive throughout).
+Cross-backend agreement (MLX bf16 vs PyTorch bf16, against the same source weights) is asserted via `tests/test_cross_backend_correctness.py` using top-K softmax-weighted token sets per decode position. Floors are calibrated as regression guards, not tightness bars: at landing, 3/3 position-0 top-1 matches and 3.07 average top-5 overlap (vocab=262K → random top-5 overlap ≈ 0).
 
-**Why phase stays PARTIAL.** The path to a clean 5-prompt smoke runs
-through the PyTorch primitive that's broken on this hardware
-combination, not through model_shard. Real fixes are out of scope:
-file a PyTorch issue with a minimal `grouped_mm` repro on GB10 +
-CUDA 13.0 + bf16, downgrade to CUDA 12.x where this primitive is
-mature, or wait for upstream fixes. Within model_shard scope, two
-bandaids exist if needed: pre-warm all expected `(1, N, 2816)` shapes
-at process startup (paying ~55 min × distinct prompt-lengths once,
-hoping the cubin cache survives — it didn't in our testing), or
-work-around by routing through `_grouped_mm_fallback` (the for-loop
-reference impl, no JIT but slower per call). Neither is the right
-abstraction for a "CDN for experts on heterogeneous hardware" thesis,
-so neither lands here.
+---
 
-**Landed during Task 10 prep.** A `--warmup` flag on
-`scripts/run_client.py` that pre-runs each prompt with
-`max_new_tokens=1` before timed pass — useful as a structural feature
-even though it doesn't help with this specific JIT (the warmup itself
-hits the same wall). A `PyTorchBackend` import sentinel mirroring the
-`MLXBackend` pattern so a Mac `uv sync --extra dev` (no `--extra
-pytorch`) can import `model_shard.backends` without errors. See
-`docs/superpowers/plans/2026-04-24-phase7c3b-heterogeneous-cluster.md`.
+## Roadmap
 
-## Phase 6-B status: Provenance Verification — complete
+The project is structured as a six-phase research program. The first six phases are complete; Phase 7 (heterogeneous deployment) is in progress.
 
-Every forward pass now carries a hash-chained DAG of `ProvenanceEntry` records that
-mirrors Gemma's computation graph. Each entry is a BLAKE2b-256 digest over
-`(parents || node_id || op_descriptor || output_bytes)`. In the canonical 3-node ×
-1-split-layer × top-8 config this produces 40 entries per forward pass: one per pipeline
-hop, one per expert invocation, and one final aggregation entry. Every node validates
-inbound chains at receive-time and rejects any entry whose hash does not match the
-declared parents; an invalid chain returns `Error{ERR_INVALID_PROVENANCE}` to the
-client immediately.
+| Phase | Status | What it adds |
+|---|---|---|
+| 1. Static pipeline | done | 3-shard pipeline; Tier 1/2 bit-exact baseline. |
+| 2. Gossip discovery | done | SWIM membership; admission control; clean in-flight failure on peer death. |
+| 3. Expert-level sharding | done | Fan out a single MoE layer's 128 experts across nodes via `ExpertRequest`. |
+| 4. Load-aware routing | done | Power-of-two-choices over multi-candidate experts using gossiped load EMAs. |
+| 5a. Partial expert loading | done | Load only owned experts; precondition for migration and 24 GB-VRAM deployments. |
+| 5b. Dynamic expert migration | done | Heat-driven pull-migration of expert weights between peers, bit-exact on receive. |
+| 6-A. Expert-peer retry | done | Local retry to alternate replicas on peer failure (no central coordinator). |
+| 6-B. Provenance verification | done | Hash-chained DAG validated at every receive hop; rejects topology / authorization errors. |
+| 6-C. Expert eviction | done | LWW REMOVE deltas with safety invariants (bootstrap-protected, last-replica refusal, attach cooldown). |
+| 7-A. Backend protocol | done | `Backend` abstraction with `MLXBackend`; zero behavioral change on default deployments. |
+| 7-B. PyTorch backend | done | Full 20-method protocol parity on CUDA / DGX Spark, including slice/attach/detach. |
+| 7-C-1. Real HF Gemma 4 forward | done | `PyTorchBackend` validated against real HF `Gemma4ForCausalLM` (not stubs). |
+| 7-C-2. Cross-backend correctness | done | Top-K agreement floors between MLX and PyTorch backends. |
+| 7-C-3a. Bf16 canonical rebaseline | done | Single source weights for both backends; agreement jumped from 1/3 to 3/3 top-1. |
+| 7-C-3b. Heterogeneous cluster smoke | **partial** | 3-machine cluster boots and serves; full smoke blocked on upstream `grouped_mm` pathology on Grace Blackwell + CUDA 13. |
+| 7-C-4. Tech-debt cleanup | done | Backend owns outer decoder ops + batched aggregate; unused threading removed. |
 
-The goal is topology and authorization enforcement — reject any path that doesn't
-match the model's true computation graph — not Byzantine-insider detection. Phase 5b's
-`owners_of` is the authorization oracle: a node is only a valid parent for a given
-(layer, expert) pair if it appears in `owners_of(L, E)`. Phase 6-A's retries validate
-naturally because the retry target is always drawn from `owners_of(L, E)`, so the
-chain stays structurally correct across retry hops.
+Per-phase design rationale lives in `docs/superpowers/specs/<date>-phase<N>-*-design.md`; per-phase implementation plans (with task breakdowns) live in `docs/superpowers/plans/<date>-phase<N>-*.md`.
 
-Gate: `ENABLE_PROVENANCE=true` (default off).
+### What's next
 
-Correctness proofs: `tests/test_provenance_tier1.py` asserts bit-exact Tier 1 token
-output against the Phase 1 reference with provenance enabled, proving provenance is
-pure bookkeeping with zero compute effect. `tests/test_provenance_determinism.py`
-confirms that identical inputs produce identical hashes. `tests/test_provenance_rejection.py`
-corrupts one byte of a chain entry and verifies the next hop rejects with
-`ERR_INVALID_PROVENANCE` and the client receives the error cleanly with no hang.
+Carry-forwards under consideration for a future phase:
 
-A gap filled during Task 10: the tail-to-head-to-client error-propagation path for
-mid-pipeline rejections was absent. Task 10 added `_handle_upstream_error` on the
-head node to forward errors to the client and poison the decode queue; this is a
-broader improvement beyond provenance that previously would have caused mid-pipeline
-errors to hang the decode loop silently.
+- File a PyTorch upstream issue for the `grouped_mm` shape-resolution pathology on GB10 + CUDA 13 + bf16 (the blocker for 7-C-3b's clean smoke).
+- Pipeline-peer redundancy (deferred from 6-A case 2 — requires redundant layer ranges in `shards.yaml`).
+- Signed `ProvenanceEntry` + sample-rerun re-verification (Byzantine-insider detection beyond 6-B's topology bar).
+- Cross-node ownership-exclusion gossip (so a peer that fails for one node is excluded for all routers, not just locally — 6-A R5).
+- `slice_expert` format bridge for cross-backend migration (MLX returns the 9-tensor canonical layout; PyTorch returns HF's 2-tensor fused layout).
 
-Non-goals: cryptographic signatures, hash re-verification by sample re-run (Phase
-6-B.4 follow-up), KV-cache integrity, cross-token chain linking. See
-`docs/superpowers/specs/2026-04-17-phase6b-provenance-verification-design.md`.
+---
 
-## Phase 4 status: Load-Aware Routing — complete
+## Hardware notes
 
-Nodes now gossip a compact queue-depth EMA to each other via `LoadReport` piggybacked
-on existing SWIM `Ping`/`Ack` messages. When `moe_experts` in `config/shards.yaml`
-lists an expert on multiple shards, `ExpertOrchestrator` routes each top-k dispatch
-to the less-loaded candidate via power-of-two-choices. The default config overlaps
-experts 0, 1, and 2 across two shards each for a live multi-candidate scenario;
-routing correctness is verified by `tests/test_routing_correctness.py`, and gossip
-delivery is verified end-to-end by `tests/test_expert_rpc_load_shift.py` via a new
-`/loads` debug endpoint (served alongside `/membership` at `tcp_port + 2000`). No
-new env var — the behavior auto-activates when `moe_experts` has overlapping entries.
-See `docs/superpowers/specs/2026-04-16-phase4-load-aware-routing-design.md`.
+The development matrix is asymmetric:
+
+- **M5 Mac, 128 GB unified.** Primary dev machine. Can hold the full bf16 model (~52 GB) plus 2–3 partitioned node processes simultaneously. Used for Tier 1/2 bit-exactness tests, single-machine 3-process demos, and the MLX side of cross-backend agreement.
+- **NVIDIA DGX Spark (GB10, 128 GB unified LPDDR5X).** PyTorch + CUDA 13 reference. Holds full bf16 model. Used for Tier 1 PyTorch fixtures and as the mid shard in heterogeneous smoke.
+- **RTX 3090 (24 GB VRAM).** PyTorch + CUDA 12.8 (forward-compat against driver 545). Used for partial-load deployments — the 24 GB constraint is the design point for `ENABLE_PARTIAL_LOAD` + migration.
+- **Tailscale mesh** connects the three machines; SWIM gossip and activation TCP both go over IPv4.
+
+---
+
+## Further reading
+
+- **Spec:** `/Users/lukechang/Downloads/gossip-moe-inference-spec.md` (v0.1, April 2026) — the original 20-week research-program spec.
+- **Per-phase design specs:** `docs/superpowers/specs/`
+- **Per-phase implementation plans:** `docs/superpowers/plans/`
+- **Reference architecture facts** (Gemma 4 26B): see Phase 1 plan for the layer-shape derivation.
